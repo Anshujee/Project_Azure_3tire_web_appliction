@@ -50,6 +50,7 @@ module "databases" {
   tags                = local.tags
 
   sql_admin_password = var.sql_admin_password
+  sql_location       = var.sql_location
 }
 
 module "keyvault" {
