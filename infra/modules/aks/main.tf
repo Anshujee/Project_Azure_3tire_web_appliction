@@ -33,8 +33,8 @@ resource "azurerm_kubernetes_cluster" "main" {
     os_disk_size_gb = 128
     os_disk_type    = "Managed"
 
-    # Enable availability zones for high availability
-    zones = ["1", "2"]
+    # zones removed — free tier subscriptions only support zone 2 in eastus
+    # Re-add zones = ["1","2","3"] when using a paid subscription
   }
 
   # ── Networking ────────────────────────────
@@ -123,8 +123,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "user" {
   os_disk_size_gb = 128
   os_disk_type    = "Managed"
 
-  # Spread nodes across availability zones for resilience
-  zones = ["1", "2", "3"]
+  # zones removed — free tier subscription zone limitation (see system node pool comment)
 
   # Lifecycle: ignore node_count changes made by autoscaler
   # Without this Terraform would reset count to 3 on every apply

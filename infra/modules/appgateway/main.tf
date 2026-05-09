@@ -160,35 +160,17 @@ resource "azurerm_application_gateway" "main" {
 
   # ── Routing Rules ────────────────────────────
 
-  # Rule 1: Redirect HTTP → HTTPS (force secure connections)
-  # All port 80 traffic is permanently redirected to port 443
+  # Route HTTP traffic directly to AKS backend
+  # HTTP→HTTPS redirect requires a separate HTTPS listener with a valid SSL cert
+  # SSL cert will be added in Phase 6 when AKS ingress IP is available
   request_routing_rule {
-    name                        = local.redirect_rule_name
-    rule_type                   = "Basic"
-    http_listener_name          = local.http_listener_name
-    redirect_configuration_name = local.redirect_config_name
-    priority                    = 100
+    name                       = local.https_routing_rule_name
+    rule_type                  = "Basic"
+    http_listener_name         = local.http_listener_name
+    backend_address_pool_name  = local.backend_pool_name
+    backend_http_settings_name = local.backend_settings_name
+    priority                   = 100
   }
-
-  # Redirect configuration for HTTP → HTTPS
-  redirect_configuration {
-    name                 = local.redirect_config_name
-    redirect_type        = "Permanent"  # HTTP 301 redirect
-    target_listener_name = local.http_listener_name
-    include_path         = true
-    include_query_string = true
-  }
-
-  # Rule 2: Route HTTPS traffic to AKS backend
-  # Uncomment when SSL cert is added:
-  # request_routing_rule {
-  #   name                       = local.https_routing_rule_name
-  #   rule_type                  = "Basic"
-  #   http_listener_name         = local.https_listener_name
-  #   backend_address_pool_name  = local.backend_pool_name
-  #   backend_http_settings_name = local.backend_settings_name
-  #   priority                   = 200
-  # }
 
   # ── Zones ────────────────────────────────────
   # Deploy across availability zones for high availability
