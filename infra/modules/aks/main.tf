@@ -1,3 +1,5 @@
+data "azurerm_client_config" "current" {}
+
 # ─────────────────────────────────────────────
 # AKS Cluster
 # ─────────────────────────────────────────────
@@ -52,7 +54,7 @@ resource "azurerm_kubernetes_cluster" "main" {
   # azure_rbac_enabled = use Azure RBAC to control who can run kubectl commands
   # managed = true enables AKS-managed Entra integration (required in azurerm v3.x)
   azure_active_directory_role_based_access_control {
-    managed            = true
+    tenant_id          = data.azurerm_client_config.current.tenant_id
     azure_rbac_enabled = true
   }
 
@@ -115,7 +117,7 @@ resource "azurerm_kubernetes_cluster_node_pool" "user" {
   tags                  = var.tags
 
   # Autoscaling — Kubernetes adds/removes nodes based on pending pods
-  enable_auto_scaling = true
+  auto_scaling_enabled = true
   node_count          = var.user_node_count
   min_count           = var.user_node_min_count
   max_count           = var.user_node_max_count

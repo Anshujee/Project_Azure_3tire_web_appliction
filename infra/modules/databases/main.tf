@@ -159,7 +159,7 @@ resource "azurerm_cosmosdb_sql_container" "products" {
 
   # Partition key — Cosmos DB distributes data across partitions using this field
   # /categoryId means products are partitioned by category (good for product queries)
-  partition_key_path    = "/categoryId"
+  partition_key_paths   = ["/categoryId"]
   partition_key_version = 1
 
   indexing_policy {
@@ -181,7 +181,7 @@ resource "azurerm_cosmosdb_sql_container" "cart" {
 
   # /userId means each user's cart is in its own partition
   # Cart queries are always by userId so this is the ideal partition key
-  partition_key_path    = "/userId"
+  partition_key_paths   = ["/userId"]
   partition_key_version = 1
 
   # Cart items expire automatically after 7 days (TTL = Time To Live)
@@ -212,7 +212,7 @@ resource "azurerm_redis_cache" "main" {
   tags                = var.tags
 
   # Disable non-SSL port 6379 — force all connections over TLS port 6380
-  enable_non_ssl_port = false
+  non_ssl_port_enabled = false
 
   # Minimum TLS version
   minimum_tls_version = "1.2"
