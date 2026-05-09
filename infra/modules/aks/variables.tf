@@ -44,25 +44,25 @@ variable "system_node_vm_size" {
 variable "user_node_count" {
   description = "Initial number of nodes in the user node pool"
   type        = number
-  default     = 3
+  default     = 1   # reduced from 3 — free tier vCPU quota is 10 total (2 used by system pool)
 }
 
 variable "user_node_vm_size" {
   description = "VM size for user node pool"
   type        = string
-  default     = "Standard_D4s_v3"
+  default     = "Standard_D2s_v3"   # reduced from D4s_v3 (4 vCPU) to D2s_v3 (2 vCPU) for free tier quota
 }
 
 variable "user_node_min_count" {
   description = "Minimum nodes for user node pool autoscaler"
   type        = number
-  default     = 2
+  default     = 1   # reduced from 2 for free tier vCPU quota
 }
 
 variable "user_node_max_count" {
   description = "Maximum nodes for user node pool autoscaler"
   type        = number
-  default     = 10
+  default     = 3   # reduced from 10 for free tier vCPU quota
 }
 
 variable "api_server_authorized_ip_ranges" {

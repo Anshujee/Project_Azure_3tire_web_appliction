@@ -172,7 +172,8 @@ resource "azurerm_application_gateway" "main" {
     priority                   = 100
   }
 
-  # ── Zones ────────────────────────────────────
-  # Deploy across availability zones for high availability
-  zones = ["1", "2", "3"]
+  # zones removed — public IP pip-appgw-azureshop-dev was created non-zonal in
+  # the first apply and is already in state; a zonal AppGW cannot reference a
+  # non-zonal public IP. Zones can be re-added on a paid subscription with a
+  # zone-redundant public IP.
 }

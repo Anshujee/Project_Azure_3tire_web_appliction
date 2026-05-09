@@ -40,6 +40,7 @@ resource "azurerm_dashboard_grafana" "main" {
   resource_group_name               = var.resource_group_name
   location                          = var.location
   sku                               = "Standard"
+  grafana_major_version             = 11      # Azure requires v11 or v12 for Standard SKU
   api_key_enabled                   = true    # Allow API access for dashboard automation
   deterministic_outbound_ip_enabled = true    # Fixed outbound IP for firewall rules
   public_network_access_enabled     = true    # Allow browser access to Grafana UI
