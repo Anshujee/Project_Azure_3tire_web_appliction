@@ -109,11 +109,11 @@ resource "azurerm_cosmosdb_account" "main" {
   tags                = var.tags
 
   # Automatic failover: if primary region goes down, Azure promotes a replica
-  enable_automatic_failover = true
+  automatic_failover_enabled = true
 
   # Free tier: first 1000 RU/s and 25GB storage free per account
   # Only 1 free tier account per subscription allowed
-  enable_free_tier = false
+  free_tier_enabled = false
 
   # Consistency level — controls read/write behaviour across regions
   # Session: reads always see your own writes (default, best for most apps)
