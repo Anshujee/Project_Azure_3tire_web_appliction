@@ -43,3 +43,9 @@ variable "log_retention_days" {
   type        = number
   default     = 30
 }
+
+variable "keyvault_network_default_action" {
+  description = "Key Vault firewall default action: Allow (dev — Terraform runs locally) or Deny (prod)"
+  type        = string
+  default     = "Deny"
+}
