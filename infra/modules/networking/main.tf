@@ -17,6 +17,13 @@ resource "azurerm_subnet" "aks" {
   resource_group_name  = var.resource_group_name
   virtual_network_name = azurerm_virtual_network.main.name
   address_prefixes     = [var.aks_subnet_cidr]
+
+  # Service endpoints allow Azure services to identify traffic coming from this subnet
+  # Required for Cosmos DB and SQL VNet rules — without this, the VNet rule is rejected
+  service_endpoints = [
+    "Microsoft.AzureCosmosDB",
+    "Microsoft.Sql"
+  ]
 }
 
 resource "azurerm_subnet" "db" {
