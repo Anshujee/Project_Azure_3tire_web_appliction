@@ -6,7 +6,10 @@ data "azurerm_client_config" "current" {}
 # Azure Key Vault
 # ─────────────────────────────────────────────
 resource "azurerm_key_vault" "main" {
-  name                = "kv-${var.project}-${var.environment}"
+  # Key Vault names are globally unique across all Azure subscriptions
+  # Append first 4 chars of subscription ID to guarantee uniqueness
+  # This matches the pattern used in Phase 1: kv-azureshop-6a6c
+  name                = "kv-${var.project}-${substr(data.azurerm_client_config.current.subscription_id, 0, 4)}-${var.environment}"
   location            = var.location
   resource_group_name = var.resource_group_name
   tenant_id           = data.azurerm_client_config.current.tenant_id
