@@ -50,7 +50,7 @@ resource "azurerm_kubernetes_cluster" "main" {
 
   # ── RBAC + Azure AD Integration ──────────
   # azure_rbac_enabled = use Azure RBAC to control who can run kubectl commands
-  # managed = true means Azure manages the AD integration automatically
+  # managed = true enables AKS-managed Entra integration (required in azurerm v3.x)
   azure_active_directory_role_based_access_control {
     managed            = true
     azure_rbac_enabled = true
