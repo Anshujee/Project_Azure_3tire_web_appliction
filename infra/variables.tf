@@ -49,3 +49,9 @@ variable "keyvault_network_default_action" {
   type        = string
   default     = "Deny"
 }
+
+variable "sql_location" {
+  description = "Azure region for SQL Server — free tier restricts eastus/eastus2; use westus2 for dev"
+  type        = string
+  default     = "westus2"
+}
