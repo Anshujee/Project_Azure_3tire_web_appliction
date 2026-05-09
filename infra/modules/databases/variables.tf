@@ -30,6 +30,12 @@ variable "aks_subnet_id" {
 }
 
 # ── Azure SQL ──────────────────────────────────────
+variable "sql_location" {
+  description = "Azure region for SQL Server — may differ from main location on free tier subscriptions where eastus SQL provisioning is disabled"
+  type        = string
+  default     = "eastus2"
+}
+
 variable "sql_admin_username" {
   description = "SQL Server administrator login username"
   type        = string

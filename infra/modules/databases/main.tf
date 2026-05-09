@@ -7,7 +7,7 @@
 # Name must be globally unique — used as DNS: sql-azureshop-dev.database.windows.net
 resource "azurerm_mssql_server" "main" {
   name                         = "sql-${var.project}-${var.environment}"
-  location                     = var.location
+  location                     = var.sql_location
   resource_group_name          = var.resource_group_name
   version                      = "12.0"   # SQL Server 2019 engine
   administrator_login          = var.sql_admin_username
