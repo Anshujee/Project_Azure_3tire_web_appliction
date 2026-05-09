@@ -18,7 +18,7 @@ resource "azurerm_key_vault" "main" {
 
   # RBAC authorization — use Azure roles instead of legacy Access Policies
   # Allows the same RBAC system used across all Azure to control Key Vault access
-  enable_rbac_authorization = true
+  rbac_authorization_enabled = true
 
   # Soft delete — deleted vault and secrets are retained for 90 days
   # Protects against accidental deletion — vault is recoverable
