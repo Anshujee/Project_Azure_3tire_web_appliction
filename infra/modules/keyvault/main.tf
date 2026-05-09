@@ -30,7 +30,7 @@ resource "azurerm_key_vault" "main" {
 
   # Network access — allow Azure services + specific VNet
   network_acls {
-    default_action = "Deny"         # Block all traffic by default
+    default_action = var.network_default_action
     bypass         = "AzureServices" # Allow trusted Azure services (Azure Monitor, Pipelines)
     ip_rules       = []
   }

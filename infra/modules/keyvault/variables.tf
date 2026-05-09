@@ -78,3 +78,14 @@ variable "redis_primary_access_key" {
   type        = string
   sensitive   = true
 }
+
+variable "network_default_action" {
+  description = "Key Vault firewall default action: Allow (dev) or Deny (prod). RBAC still gates all access."
+  type        = string
+  default     = "Deny"
+
+  validation {
+    condition     = contains(["Allow", "Deny"], var.network_default_action)
+    error_message = "network_default_action must be Allow or Deny."
+  }
+}

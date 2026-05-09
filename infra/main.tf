@@ -73,6 +73,8 @@ module "keyvault" {
   redis_hostname           = module.databases.redis_hostname
   redis_ssl_port           = module.databases.redis_ssl_port
   redis_primary_access_key = module.databases.redis_primary_access_key
+
+  network_default_action = var.keyvault_network_default_action
 }
 
 module "appgateway" {
