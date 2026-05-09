@@ -1,0 +1,55 @@
+Work Item Type,Title,Description,Area Path,Iteration Path,Priority,Story Points,Tags
+Epic,Infrastructure as Code,"Provision all Azure infrastructure using Terraform with remote state in Azure Blob Storage. Covers networking, AKS, ACR, databases, Key Vault, and Application Gateway.",AzureShop,AzureShop,1,,Phase2;IaC;Terraform
+Epic,Microservices Development,"Build 8 minimal microservices (frontend, api-gateway, user, product, cart, order, payment, notification) with Docker support and health endpoints.",AzureShop,AzureShop,2,,Phase3;Microservices;Docker
+Epic,CI/CD Pipelines,"Implement fully automated YAML-based Azure Pipelines for every service with multi-stage deployment across dev, staging, and prod environments.",AzureShop,AzureShop,3,,Phase5;Pipelines;CICD
+Epic,Kubernetes Deployment,"Deploy all microservices to AKS using Helm charts with production-grade configurations: HPA, PDB, Network Policies, Workload Identity, and Key Vault CSI.",AzureShop,AzureShop,4,,Phase6;AKS;Kubernetes;Helm
+Epic,Monitoring & Security,"Full observability via Azure Monitor, App Insights, Managed Grafana, and Defender for Cloud. Includes shift-left security via SonarCloud and Trivy.",AzureShop,AzureShop,5,,Phase7;Phase8;Monitoring;Security;DevSecOps
+Issue,Terraform Remote State Backend,Create Azure Storage Account and Blob container for Terraform state. Configure backend.tf with azurerm backend.,AzureShop,AzureShop,1,,Phase2;Terraform
+Issue,Networking Module (VNet + Subnets + NSGs),Terraform module for VNet (10.0.0.0/8) with subnets for AKS / DB / AppGW / Bastion and NSG rules.,AzureShop,AzureShop,1,,Phase2;Networking
+Issue,Azure Container Registry (ACR) Module,Terraform module for ACR Premium with vulnerability scanning and AcrPull role for AKS.,AzureShop,AzureShop,1,,Phase2;ACR;Docker
+Issue,AKS Cluster Module,Terraform module for AKS with system/user node pools + Azure CNI + RBAC + Managed Identity + addons.,AzureShop,AzureShop,1,,Phase2;AKS;Kubernetes
+Issue,Databases Module,Terraform module for Azure SQL + Cosmos DB + Redis with private endpoints and encryption.,AzureShop,AzureShop,1,,Phase2;Database;SQL;CosmosDB;Redis
+Issue,Key Vault Module,Terraform module for Key Vault with RBAC + soft delete + purge protection + secret storage.,AzureShop,AzureShop,1,,Phase2;KeyVault;Security
+Issue,Application Gateway + WAF Module,Terraform module for AppGW WAF v2 with SSL termination and OWASP 3.2 rules.,AzureShop,AzureShop,1,,Phase2;AppGateway;WAF;Networking
+Issue,Monitoring Infrastructure Module,Terraform module for Log Analytics Workspace + App Insights (per service) + Managed Grafana.,AzureShop,AzureShop,1,,Phase2;Monitoring;Grafana;AppInsights
+Issue,Environment Separation (dev/staging/prod),Separate tfvars and state files per environment. Resource tagging for all Azure resources.,AzureShop,AzureShop,1,,Phase2;Environments;Terraform
+Issue,User Service (Node.js + Azure SQL),REST API: register / login / get-profile. JWT auth. Azure SQL connectivity. Multi-stage Dockerfile.,AzureShop,AzureShop,2,,Phase3;NodeJS;UserService
+Issue,Product Service (Python/FastAPI + Cosmos DB),REST API: list/get/create products. Cosmos DB SQL API. Multi-stage Dockerfile.,AzureShop,AzureShop,2,,Phase3;Python;FastAPI;ProductService
+Issue,Cart Service (Node.js + Redis),REST API: get/add/remove/clear cart. Redis Cache storage. Multi-stage Dockerfile.,AzureShop,AzureShop,2,,Phase3;NodeJS;Redis;CartService
+Issue,Order Service (Node.js + Azure SQL + Service Bus),REST API: place/get/update orders. Azure SQL + Service Bus event publishing. Dockerfile.,AzureShop,AzureShop,2,,Phase3;NodeJS;ServiceBus;OrderService
+Issue,Payment Service (Node.js — Mock),Mock payment REST API. Service Bus subscription. Always returns success. Dockerfile.,AzureShop,AzureShop,2,,Phase3;NodeJS;PaymentService
+Issue,Notification Service (Node.js + Service Bus),Subscribe to order/payment events. Mock email/SMS via console log. Dockerfile.,AzureShop,AzureShop,2,,Phase3;NodeJS;ServiceBus;NotificationService
+Issue,Frontend (Next.js),Pages: home / product / cart / login / orders. Connects to API Gateway. Multi-stage Dockerfile.,AzureShop,AzureShop,2,,Phase3;NextJS;Frontend
+Issue,API Gateway (NGINX),NGINX routing to all services. Rate limiting. Request logging. Dockerfile.,AzureShop,AzureShop,2,,Phase3;NGINX;APIGateway
+Issue,Reusable Pipeline Templates,build-template.yaml + deploy-template.yaml + test-template.yaml in pipelines/templates/.,AzureShop,AzureShop,3,,Phase5;Pipelines;Templates
+Issue,CI Pipelines (8 services),Per-service CI: build + test + SonarCloud + Docker build + Trivy scan + push to ACR.,AzureShop,AzureShop,3,,Phase5;CI;Pipelines
+Issue,CD Pipelines (dev / staging / prod),Multi-stage CD: deploy-dev.yaml + deploy-staging.yaml + deploy-prod.yaml with Helm.,AzureShop,AzureShop,3,,Phase5;CD;Pipelines
+Issue,Terraform Validate & Apply Pipelines,terraform-validate.yaml (on PR) + terraform-apply.yaml (on merge to main) with gates.,AzureShop,AzureShop,3,,Phase5;Terraform;Pipelines;IaC
+Issue,Variable Groups & Environments Setup,vg-common / vg-dev / vg-staging / vg-prod linked to Key Vault. Environments with approvals.,AzureShop,AzureShop,3,,Phase5;Pipelines;Security
+Issue,Pipeline Security Hardening,No hardcoded secrets. Pipeline run authorization. Retention policies. Audit logging.,AzureShop,AzureShop,3,,Phase5;Security;DevSecOps
+Issue,AKS Initial Setup,Connect kubectl. Create namespaces (dev/staging/prod/monitoring). Install NGINX Ingress.,AzureShop,AzureShop,4,,Phase6;AKS;Kubernetes
+Issue,Key Vault CSI Driver Setup,Install Secrets Store CSI Driver. Create SecretProviderClass per service. Verify secret mount.,AzureShop,AzureShop,4,,Phase6;KeyVault;AKS;Security
+Issue,Helm Charts (8 services),Helm chart per service: Deployment + Service + HPA + PDB + ServiceAccount + NetworkPolicy.,AzureShop,AzureShop,4,,Phase6;Helm;Kubernetes
+Issue,Kubernetes Resource Configuration,Resource requests/limits + liveness/readiness/startup probes + pod anti-affinity for all pods.,AzureShop,AzureShop,4,,Phase6;Kubernetes;Reliability
+Issue,Ingress & TLS Configuration,Ingress resources per namespace with routing rules + Azure-managed TLS + rate limiting.,AzureShop,AzureShop,4,,Phase6;Ingress;TLS;Networking
+Issue,Network Policies,Default-deny ingress/egress. Allow only required service-to-service and Azure service traffic.,AzureShop,AzureShop,4,,Phase6;Networking;Security;Kubernetes
+Issue,Workload Identity (Managed Identity per pod),OIDC Issuer + Workload Identity on AKS. User-assigned managed identity per service federated with K8s ServiceAccount.,AzureShop,AzureShop,4,,Phase6;Security;Identity;AKS
+Issue,Application Insights Integration,Add App Insights SDK to all services. Distributed tracing + dependency + exception tracking.,AzureShop,AzureShop,5,,Phase7;Monitoring;AppInsights
+Issue,Azure Monitor & Container Insights,Enable Container Insights on AKS. Diagnostic settings for all Azure resources to Log Analytics.,AzureShop,AzureShop,5,,Phase7;Monitoring;AzureMonitor
+Issue,Log Analytics KQL Queries,Write and save KQL queries: slowest endpoints / error rate / failed logins / pod restarts.,AzureShop,AzureShop,5,,Phase7;KQL;Monitoring;Observability
+Issue,Grafana Dashboards,Dashboards: AKS Cluster Overview + Application Health + Business Metrics.,AzureShop,AzureShop,5,,Phase7;Grafana;Monitoring
+Issue,Alerts Configuration,Alerts for CPU/memory/error rate/response time/pod restarts/SQL DTU. Action Group for email+Teams.,AzureShop,AzureShop,5,,Phase7;Alerts;Monitoring
+Issue,Defender for Cloud Setup,Enable Defender for Containers + SQL + Key Vault + Storage. Remediate Secure Score to >80%.,AzureShop,AzureShop,5,,Phase8;Security;Defender
+Issue,Azure Policy & Governance,Assign built-in policies. Custom policy for ACR. Policy Initiative. Assign to subscription.,AzureShop,AzureShop,5,,Phase8;Governance;AzurePolicy
+Issue,RBAC & Least Privilege,Create AD groups (developers/devops/readonly). Review all role assignments. Enable PIM for prod.,AzureShop,AzureShop,5,,Phase8;RBAC;Security;IAM
+Issue,Pipeline Security (SAST + Trivy + Secrets),SonarCloud SAST + Trivy image scan + gitleaks secret scanning + npm audit + safety check in all CI pipelines.,AzureShop,AzureShop,5,,Phase8;DevSecOps;SAST;Security
+Issue,Network Security Hardening,Verify NSG least-privilege. Enable DDoS Protection. Verify WAF Prevention mode. Private endpoints for all DBs.,AzureShop,AzureShop,5,,Phase8;Networking;Security
+Issue,Secret Management Audit,Zero secrets in code/pipelines/images/K8s manifests. All secrets in Key Vault. Access audit review.,AzureShop,AzureShop,5,,Phase8;Security;KeyVault
+Issue,Create Azure free account and resource group rg-azureshop-dev,Create Azure subscription. Create Resource Group rg-azureshop-dev in chosen region. Note Subscription ID.,AzureShop,AzureShop\Sprint 1,1,1,Phase1;Foundation;Azure
+Issue,Enable all required Azure resource providers,"Enable: Microsoft.ContainerService, Microsoft.ContainerRegistry, Microsoft.KeyVault, Microsoft.Sql, Microsoft.DocumentDB, Microsoft.Cache, Microsoft.ServiceBus, Microsoft.Network, Microsoft.Storage.",AzureShop,AzureShop\Sprint 1,1,1,Phase1;Foundation;Azure
+Issue,Create Azure DevOps org and project,Create org azureshop-org at dev.azure.com. Create project AzureShop (Private). Enable all services.,AzureShop,AzureShop\Sprint 1,1,1,Phase1;Foundation;AzureDevOps
+Issue,Initialize monorepo and configure branch strategy,"Create azureshop repo. Push initial structure. Create branches: main / dev / feature/* / release/* / hotfix/*.",AzureShop,AzureShop\Sprint 1,1,2,Phase1;Foundation;Git;Branching
+Issue,Configure branch policies on main and dev,"main: require PR + 1 reviewer + linked work item + block direct push. dev: require PR + build validation.",AzureShop,AzureShop\Sprint 1,1,1,Phase1;Foundation;BranchPolicy;Git
+Issue,Create Service Principal for Terraform,Run az ad sp create-for-rbac for sp-azureshop-terraform with Contributor role. Store credentials in Key Vault.,AzureShop,AzureShop\Sprint 1,1,2,Phase1;Foundation;ServicePrincipal;Security
+Issue,Create Service Connection in Azure DevOps,Project Settings → Service Connections → New → Azure Resource Manager. Name: sc-azureshop-azure.,AzureShop,AzureShop\Sprint 1,1,1,Phase1;Foundation;AzureDevOps;ServiceConnection
+Issue,Install and verify all local tools,Verify: az / terraform / kubectl / helm / docker are installed and working. Login to az and set default subscription.,AzureShop,AzureShop\Sprint 1,1,1,Phase1;Foundation;Tools;LocalSetup
