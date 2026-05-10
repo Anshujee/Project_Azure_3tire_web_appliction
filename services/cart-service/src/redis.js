@@ -13,11 +13,15 @@ function connect() {
     return;
   }
 
+  // REDIS_TLS=false disables TLS for local dev (Docker Compose)
+  // TLS is enabled by default — always on in Azure
+  const useTls = process.env.REDIS_TLS !== 'false';
+
   client = new Redis({
     host,
     port: parseInt(port),
     password,
-    tls: { servername: host },  // Azure Redis requires TLS on port 6380
+    ...(useTls && { tls: { servername: host } }),
     retryStrategy: (times) => {
       // Retry up to 3 times with exponential backoff, then give up
       if (times > 3) {
