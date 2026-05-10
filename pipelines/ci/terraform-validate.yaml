@@ -1,0 +1,99 @@
+# CI Pipeline — Terraform Validate
+# Triggers: any PR to dev that touches infra/**
+# What it does: fmt check → validate → plan (no apply)
+# Purpose: catch infrastructure mistakes before they are merged
+
+trigger:
+  branches:
+    include:
+      - dev
+      - feature/*
+  paths:
+    include:
+      - infra/**
+
+pr:
+  branches:
+    include:
+      - dev
+  paths:
+    include:
+      - infra/**
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: vg-common
+  - name: TF_VERSION
+    value: 1.14.8
+  - name: TF_WORKING_DIR
+    value: infra
+  - name: TF_BACKEND_KEY
+    value: dev.tfstate
+
+stages:
+  - stage: Validate
+    displayName: 'Terraform Validate'
+    jobs:
+      - job: TerraformValidate
+        displayName: 'fmt → validate → plan'
+        steps:
+
+          # ── Install Terraform ─────────────────────────────────
+          - task: TerraformInstaller@1
+            displayName: 'Install Terraform $(TF_VERSION)'
+            inputs:
+              terraformVersion: $(TF_VERSION)
+
+          # ── terraform init ────────────────────────────────────
+          - task: AzureCLI@2
+            displayName: 'terraform init'
+            inputs:
+              azureSubscription: sc-azureshop-azure
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                cd $(TF_WORKING_DIR)
+                terraform init \
+                  -backend-config="key=$(TF_BACKEND_KEY)" \
+                  -backend-config="storage_account_name=myprojectazshoptfstate" \
+                  -backend-config="container_name=tfstate" \
+                  -backend-config="resource_group_name=$(RESOURCE_GROUP)"
+
+          # ── terraform fmt ─────────────────────────────────────
+          # Fails if any .tf file is not properly formatted
+          # Enforces consistent code style across the team
+          - script: |
+              cd $(TF_WORKING_DIR)
+              terraform fmt -check -recursive
+              echo "All Terraform files are correctly formatted"
+            displayName: 'terraform fmt check'
+
+          # ── terraform validate ────────────────────────────────
+          # Checks syntax and internal consistency of all .tf files
+          - script: |
+              cd $(TF_WORKING_DIR)
+              terraform validate
+              echo "Terraform configuration is valid"
+            displayName: 'terraform validate'
+
+          # ── terraform plan ────────────────────────────────────
+          # Shows what would change — does NOT apply anything
+          # Plan output is posted as a comment on the PR (visible in Azure DevOps)
+          - task: AzureCLI@2
+            displayName: 'terraform plan'
+            inputs:
+              azureSubscription: sc-azureshop-azure
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                cd $(TF_WORKING_DIR)
+                terraform plan \
+                  -var-file="environments/dev/terraform.tfvars" \
+                  -out=tfplan \
+                  -no-color \
+                  2>&1 | tee plan-output.txt
+                echo "##vso[task.uploadsummary]$(pwd)/plan-output.txt"
+            env:
+              TF_VAR_sql_admin_password: $(TF_VAR_SQL_ADMIN_PASSWORD)

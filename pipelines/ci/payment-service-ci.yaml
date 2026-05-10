@@ -1,0 +1,45 @@
+# CI Pipeline — payment-service
+# Triggers: any push/PR to dev that touches services/payment-service/**
+
+trigger:
+  branches:
+    include:
+      - dev
+      - feature/*
+  paths:
+    include:
+      - services/payment-service/**
+
+pr:
+  branches:
+    include:
+      - dev
+  paths:
+    include:
+      - services/payment-service/**
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: vg-common
+  - name: SERVICE_NAME
+    value: payment-service
+  - name: DOCKERFILE_PATH
+    value: services/payment-service
+  - name: NEXT_PUBLIC_API_URL
+    value: http://localhost:8080
+
+stages:
+  - stage: CI
+    displayName: 'CI — payment-service'
+    jobs:
+      - job: BuildAndPush
+        displayName: 'Build, Scan & Push'
+        steps:
+          - template: ../templates/build-template.yaml
+            parameters:
+              serviceName: $(SERVICE_NAME)
+              dockerfilePath: $(DOCKERFILE_PATH)
+              imageTag: $(Build.BuildId)
+              runTests: true

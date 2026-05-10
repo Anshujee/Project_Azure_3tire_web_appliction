@@ -1,0 +1,141 @@
+# CD Pipeline — Deploy to Staging
+#
+# Triggered automatically when deploy-dev.yaml completes successfully.
+# Deploys all 8 services to the "staging" namespace in AKS.
+#
+# Staging = production-like environment used for final validation
+# before a human approves the prod release.
+#
+# IMAGE_TAG parameter: must be passed when triggered — uses the same
+# build ID that was deployed to dev, guaranteeing the exact same
+# images are promoted through each environment.
+
+trigger: none   # only triggered by successful dev deployment
+
+resources:
+  pipelines:
+    - pipeline: deploy-dev
+      source: deploy-dev
+      trigger:
+        branches:
+          include:
+            - dev
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: vg-common
+  - group: vg-staging
+  # IMAGE_TAG is passed from the triggering dev deployment pipeline
+  # Ensures staging runs the exact same image that passed dev
+  - name: IMAGE_TAG
+    value: $(resources.pipeline.deploy-dev.runID)
+
+stages:
+  - stage: DeployStaging
+    displayName: 'Deploy to Staging'
+    jobs:
+      - deployment: DeployAllServices
+        displayName: 'Deploy all services to staging'
+        environment: staging
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+
+                - task: AzureCLI@2
+                  displayName: 'Connect to AKS'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az aks get-credentials \
+                        --resource-group $(RESOURCE_GROUP) \
+                        --name $(AKS_NAME) \
+                        --overwrite-existing
+                      kubectl create namespace $(K8S_NAMESPACE) \
+                        --dry-run=client -o yaml | kubectl apply -f -
+                      echo "Connected to AKS — namespace: $(K8S_NAMESPACE)"
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: api-gateway
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/staging.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: user-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/staging.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: product-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/staging.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: cart-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/staging.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: order-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/staging.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: payment-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/staging.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: notification-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/staging.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: frontend
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/staging.yaml
+
+                - script: |
+                    echo "=============================="
+                    echo "Staging deployment complete"
+                    echo "Image tag: $(IMAGE_TAG)"
+                    echo "=============================="
+                    kubectl get pods -n $(K8S_NAMESPACE)
+                    kubectl get services -n $(K8S_NAMESPACE)
+                  displayName: 'Deployment summary'

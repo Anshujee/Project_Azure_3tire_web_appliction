@@ -1,0 +1,160 @@
+# CD Pipeline — Deploy to Production
+#
+# Triggered automatically when deploy-staging.yaml completes successfully.
+# BUT — the "prod" environment has a MANUAL APPROVAL GATE configured
+# in Azure DevOps (Project Settings → Environments → prod → Approvals).
+#
+# Flow:
+#   1. Staging deployment succeeds
+#   2. This pipeline is queued automatically
+#   3. Pipeline PAUSES and sends approval request to the team lead
+#   4. Team lead reviews staging, approves in Azure DevOps UI
+#   5. Prod deployment runs
+#
+# This is the "human gate" between staging and production.
+# The YAML cannot bypass it — approval is enforced by the environment config.
+
+trigger: none   # only triggered by successful staging deployment
+
+resources:
+  pipelines:
+    - pipeline: deploy-staging
+      source: deploy-staging
+      trigger:
+        branches:
+          include:
+            - dev
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: vg-common
+  - group: vg-prod
+  # IMAGE_TAG propagated from staging — same image, same build ID
+  # "promote" means move the exact same image, not rebuild
+  - name: IMAGE_TAG
+    value: $(resources.pipeline.deploy-staging.runID)
+
+stages:
+  - stage: DeployProd
+    displayName: 'Deploy to Production'
+    jobs:
+
+      # This deployment job references the "prod" environment
+      # Azure DevOps will pause here and wait for the approval configured
+      # on the prod environment before running any steps
+      - deployment: DeployAllServices
+        displayName: 'Deploy all services to production'
+        environment: prod          # ← approval gate enforced here by Azure DevOps
+        timeoutInMinutes: 120      # cancel if approval not given within 2 hours
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+
+                - task: AzureCLI@2
+                  displayName: 'Connect to AKS'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az aks get-credentials \
+                        --resource-group $(RESOURCE_GROUP) \
+                        --name $(AKS_NAME) \
+                        --overwrite-existing
+                      kubectl create namespace $(K8S_NAMESPACE) \
+                        --dry-run=client -o yaml | kubectl apply -f -
+                      echo "Deploying image tag $(IMAGE_TAG) to production"
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: api-gateway
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/prod.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: user-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/prod.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: product-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/prod.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: cart-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/prod.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: order-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/prod.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: payment-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/prod.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: notification-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/prod.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: frontend
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(IMAGE_TAG)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/prod.yaml
+
+                # Production deployment summary + record image tag deployed
+                - script: |
+                    echo "======================================="
+                    echo "PRODUCTION DEPLOYMENT COMPLETE"
+                    echo "Image tag: $(IMAGE_TAG)"
+                    echo "Deployed at: $(date -u)"
+                    echo "======================================="
+                    kubectl get pods -n $(K8S_NAMESPACE)
+                    kubectl get services -n $(K8S_NAMESPACE)
+                    # Tag prod images with 'stable' so it's easy to identify
+                    az acr login --name $(ACR_NAME)
+                    for svc in api-gateway user-service product-service cart-service order-service payment-service notification-service frontend; do
+                      docker pull $(ACR_LOGIN_SERVER)/$svc:$(IMAGE_TAG)
+                      docker tag $(ACR_LOGIN_SERVER)/$svc:$(IMAGE_TAG) $(ACR_LOGIN_SERVER)/$svc:stable
+                      docker push $(ACR_LOGIN_SERVER)/$svc:stable
+                    done
+                    echo "All services tagged :stable in ACR"
+                  displayName: 'Production deployment summary'

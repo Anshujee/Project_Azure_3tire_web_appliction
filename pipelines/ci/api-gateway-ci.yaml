@@ -1,0 +1,46 @@
+# CI Pipeline — api-gateway (NGINX)
+# Triggers: any push/PR to dev that touches services/api-gateway/**
+# Note: NGINX has no application tests — runTests: false
+
+trigger:
+  branches:
+    include:
+      - dev
+      - feature/*
+  paths:
+    include:
+      - services/api-gateway/**
+
+pr:
+  branches:
+    include:
+      - dev
+  paths:
+    include:
+      - services/api-gateway/**
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: vg-common
+  - name: SERVICE_NAME
+    value: api-gateway
+  - name: DOCKERFILE_PATH
+    value: services/api-gateway
+  - name: NEXT_PUBLIC_API_URL
+    value: http://localhost:8080
+
+stages:
+  - stage: CI
+    displayName: 'CI — api-gateway'
+    jobs:
+      - job: BuildAndPush
+        displayName: 'Build, Scan & Push'
+        steps:
+          - template: ../templates/build-template.yaml
+            parameters:
+              serviceName: $(SERVICE_NAME)
+              dockerfilePath: $(DOCKERFILE_PATH)
+              imageTag: $(Build.BuildId)
+              runTests: false

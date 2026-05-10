@@ -1,0 +1,188 @@
+# CD Pipeline — Deploy to Dev
+#
+# Triggered automatically when any service CI pipeline completes
+# successfully on the dev branch.
+#
+# Deploys all 8 services to the "dev" namespace in AKS.
+# No manual approval needed — dev is for developers to test quickly.
+#
+# Image tag used: the Build.BuildId from the triggering CI pipeline
+# This ensures exactly the image that passed CI is what gets deployed.
+
+trigger: none   # never triggered by a direct push — only by CI pipeline completion
+
+# Pipeline completion triggers — fires when any of these CI pipelines
+# finish successfully on the dev branch
+resources:
+  pipelines:
+    - pipeline: user-service-ci
+      source: user-service-ci
+      trigger:
+        branches:
+          include:
+            - dev
+    - pipeline: product-service-ci
+      source: product-service-ci
+      trigger:
+        branches:
+          include:
+            - dev
+    - pipeline: cart-service-ci
+      source: cart-service-ci
+      trigger:
+        branches:
+          include:
+            - dev
+    - pipeline: order-service-ci
+      source: order-service-ci
+      trigger:
+        branches:
+          include:
+            - dev
+    - pipeline: payment-service-ci
+      source: payment-service-ci
+      trigger:
+        branches:
+          include:
+            - dev
+    - pipeline: notification-service-ci
+      source: notification-service-ci
+      trigger:
+        branches:
+          include:
+            - dev
+    - pipeline: frontend-ci
+      source: frontend-ci
+      trigger:
+        branches:
+          include:
+            - dev
+    - pipeline: api-gateway-ci
+      source: api-gateway-ci
+      trigger:
+        branches:
+          include:
+            - dev
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: vg-common
+  - group: vg-dev
+  - name: IMAGE_TAG
+    value: $(resources.triggeringAlias)  # build ID from the CI pipeline that triggered this
+
+stages:
+  - stage: DeployDev
+    displayName: 'Deploy to Dev'
+    jobs:
+
+      # ── Deployment job — special job type that records deployment history ──
+      # 'environment: dev' links to the Azure Pipelines Environment we created
+      # Azure DevOps tracks: who deployed, when, which version, pass/fail
+      - deployment: DeployAllServices
+        displayName: 'Deploy all services to dev'
+        environment: dev
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+
+                # Connect kubectl to AKS once — reused by all helm deploys below
+                - task: AzureCLI@2
+                  displayName: 'Connect to AKS'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      az aks get-credentials \
+                        --resource-group $(RESOURCE_GROUP) \
+                        --name $(AKS_NAME) \
+                        --overwrite-existing
+                      kubectl create namespace $(K8S_NAMESPACE) \
+                        --dry-run=client -o yaml | kubectl apply -f -
+                      echo "Connected to AKS — namespace: $(K8S_NAMESPACE)"
+
+                # Deploy each service using the shared deploy template
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: api-gateway
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(Build.BuildId)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/dev.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: user-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(Build.BuildId)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/dev.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: product-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(Build.BuildId)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/dev.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: cart-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(Build.BuildId)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/dev.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: order-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(Build.BuildId)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/dev.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: payment-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(Build.BuildId)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/dev.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: notification-service
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(Build.BuildId)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/dev.yaml
+
+                - template: ../templates/deploy-template.yaml
+                  parameters:
+                    serviceName: frontend
+                    environment: $(ENVIRONMENT)
+                    imageTag: $(Build.BuildId)
+                    namespace: $(K8S_NAMESPACE)
+                    replicas: $(REPLICAS)
+                    helmValuesFile: helm/values/dev.yaml
+
+                # Final summary — show all running pods in dev namespace
+                - script: |
+                    echo "=============================="
+                    echo "Dev deployment complete"
+                    echo "=============================="
+                    kubectl get pods -n $(K8S_NAMESPACE)
+                    kubectl get services -n $(K8S_NAMESPACE)
+                  displayName: 'Deployment summary'
