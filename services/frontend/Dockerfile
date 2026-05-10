@@ -12,7 +12,7 @@ COPY . .
 # Build-time env — NEXT_PUBLIC_* vars are inlined at build time
 ARG NEXT_PUBLIC_API_URL=http://localhost:8080
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-RUN npm run build
+RUN npm run build && mkdir -p /app/public
 
 # ── Stage 3: Runtime image ──────────────────────────────────────
 FROM node:20-alpine AS runtime
@@ -23,7 +23,7 @@ WORKDIR /app
 # It includes only the files needed to run — no node_modules needed
 COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
-COPY --from=builder /app/public ./public 2>/dev/null || true
+COPY --from=builder /app/public ./public
 
 USER nodejs
 EXPOSE 3000
