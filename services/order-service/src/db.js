@@ -5,7 +5,7 @@ const config = {
   database: process.env.DB_NAME,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
-  options: { encrypt: true, trustServerCertificate: false, enableArithAbort: true },
+  options: { encrypt: true, trustServerCertificate: process.env.DB_TRUST_CERT === 'true', enableArithAbort: true },
   pool: { max: 10, min: 0, idleTimeoutMillis: 30000 },
 };
 

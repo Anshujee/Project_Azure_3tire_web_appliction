@@ -6,8 +6,10 @@ const config = {
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   options: {
-    encrypt: true,              // required for Azure SQL
-    trustServerCertificate: false,
+    encrypt: true,
+    // DB_TRUST_CERT=true for local SQL Server container (self-signed cert)
+    // false by default — Azure SQL uses a valid certificate
+    trustServerCertificate: process.env.DB_TRUST_CERT === 'true',
     enableArithAbort: true,
   },
   pool: {
