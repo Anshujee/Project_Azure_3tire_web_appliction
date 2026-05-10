@@ -1,0 +1,46 @@
+# CI Pipeline — user-service
+# Triggers: any push/PR to dev that touches services/user-service/**
+# What it does: test → build → trivy scan → push to ACR
+
+trigger:
+  branches:
+    include:
+      - dev
+      - feature/*
+  paths:
+    include:
+      - services/user-service/**
+
+pr:
+  branches:
+    include:
+      - dev
+  paths:
+    include:
+      - services/user-service/**
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: vg-common
+  - name: SERVICE_NAME
+    value: user-service
+  - name: DOCKERFILE_PATH
+    value: services/user-service
+  - name: NEXT_PUBLIC_API_URL
+    value: http://localhost:8080
+
+stages:
+  - stage: CI
+    displayName: 'CI — user-service'
+    jobs:
+      - job: BuildAndPush
+        displayName: 'Build, Scan & Push'
+        steps:
+          - template: ../templates/build-template.yaml
+            parameters:
+              serviceName: $(SERVICE_NAME)
+              dockerfilePath: $(DOCKERFILE_PATH)
+              imageTag: $(Build.BuildId)
+              runTests: true

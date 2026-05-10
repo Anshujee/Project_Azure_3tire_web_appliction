@@ -1,0 +1,113 @@
+# Reusable deploy template — used by every service CD pipeline
+# Stages: connect to AKS → helm upgrade → wait for pods → smoke test
+#
+# Parameters every caller must provide:
+#   serviceName   : e.g. "user-service"
+#   environment   : e.g. "dev"
+#   imageTag      : e.g. "$(Build.BuildId)"
+
+parameters:
+  - name: serviceName
+    type: string
+  - name: environment
+    type: string
+  - name: imageTag
+    type: string
+    default: $(Build.BuildId)
+  - name: namespace
+    type: string
+    default: dev
+  - name: replicas
+    type: number
+    default: 1
+  - name: helmValuesFile
+    type: string
+    default: helm/values/dev.yaml
+
+steps:
+
+  # ── Step 1: Connect kubectl to AKS ─────────────────────────────
+  # Downloads the AKS credentials so kubectl and helm can talk to the cluster
+  - task: AzureCLI@2
+    displayName: 'Connect to AKS — ${{ parameters.environment }}'
+    inputs:
+      azureSubscription: sc-azureshop-azure
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        az aks get-credentials \
+          --resource-group $(RESOURCE_GROUP) \
+          --name $(AKS_NAME) \
+          --overwrite-existing
+        echo "Connected to AKS: $(AKS_NAME)"
+        kubectl get nodes
+
+  # ── Step 2: Create namespace if it doesn't exist ───────────────
+  - script: |
+      kubectl create namespace ${{ parameters.namespace }} \
+        --dry-run=client -o yaml | kubectl apply -f -
+      echo "Namespace '${{ parameters.namespace }}' ready"
+    displayName: 'Ensure namespace exists'
+
+  # ── Step 3: Helm upgrade/install ───────────────────────────────
+  # helm upgrade --install = deploy if new, upgrade if exists
+  # This is idempotent — safe to run multiple times
+  - task: HelmDeploy@0
+    displayName: 'Helm Deploy — ${{ parameters.serviceName }} to ${{ parameters.environment }}'
+    inputs:
+      command: upgrade
+      chartType: FilePath
+      chartPath: helm/charts/${{ parameters.serviceName }}
+      releaseName: ${{ parameters.serviceName }}
+      namespace: ${{ parameters.namespace }}
+      valueFile: ${{ parameters.helmValuesFile }}
+      overrideValues: |
+        image.repository=$(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}
+        image.tag=${{ parameters.imageTag }}
+        replicaCount=${{ parameters.replicas }}
+      install: true
+      waitForExecution: true
+      arguments: --timeout 5m
+
+  # ── Step 4: Verify deployment ──────────────────────────────────
+  # Waits until all pods are running — fails pipeline if pods don't become ready
+  - script: |
+      echo "Waiting for ${{ parameters.serviceName }} pods to be ready..."
+      kubectl rollout status deployment/${{ parameters.serviceName }} \
+        --namespace ${{ parameters.namespace }} \
+        --timeout=5m
+      echo "Deployment successful"
+      kubectl get pods -n ${{ parameters.namespace }} -l app=${{ parameters.serviceName }}
+    displayName: 'Verify deployment — ${{ parameters.serviceName }}'
+
+  # ── Step 5: Smoke test ─────────────────────────────────────────
+  # Quick health check to confirm the service is responding after deployment
+  - script: |
+      echo "Running smoke test for ${{ parameters.serviceName }}..."
+      SERVICE_IP=$(kubectl get svc ${{ parameters.serviceName }} \
+        -n ${{ parameters.namespace }} \
+        -o jsonpath='{.spec.clusterIP}')
+      SERVICE_PORT=$(kubectl get svc ${{ parameters.serviceName }} \
+        -n ${{ parameters.namespace }} \
+        -o jsonpath='{.spec.ports[0].port}')
+
+      # Retry health check up to 5 times with 10s delay
+      for i in {1..5}; do
+        STATUS=$(kubectl run smoke-test-${{ parameters.serviceName }}-$(date +%s) \
+          --image=curlimages/curl:latest \
+          --restart=Never \
+          --rm \
+          -i \
+          --namespace ${{ parameters.namespace }} \
+          -- curl -s -o /dev/null -w "%{http_code}" \
+          http://$SERVICE_IP:$SERVICE_PORT/health 2>/dev/null)
+        if [ "$STATUS" = "200" ]; then
+          echo "Smoke test passed — ${{ parameters.serviceName }} /health returned 200"
+          exit 0
+        fi
+        echo "Attempt $i: got $STATUS, retrying in 10s..."
+        sleep 10
+      done
+      echo "Smoke test failed — ${{ parameters.serviceName }} did not return 200 after 5 attempts"
+      exit 1
+    displayName: 'Smoke test — ${{ parameters.serviceName }}'

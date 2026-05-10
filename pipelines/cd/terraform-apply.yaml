@@ -1,0 +1,250 @@
+# CD Pipeline — Terraform Apply
+#
+# Trigger: merge to main branch (only infrastructure changes)
+#
+# What it does:
+#   Stage 1 — Apply to dev        (auto-approved, runs immediately)
+#   Stage 2 — Apply to staging    (manual approval required)
+#   Stage 3 — Apply to prod       (manual approval required)
+#
+# WHY trigger on main (not dev):
+#   Infrastructure changes are higher risk than code changes.
+#   main branch = reviewed, approved, production-ready.
+#   We never apply unreviewed infra changes to any environment.
+#
+# WHY three separate stages (not one apply for all envs):
+#   dev apply proves the change works before staging.
+#   staging apply validates before production.
+#   If dev apply breaks something, staging and prod never get touched.
+
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - infra/**
+
+pr: none   # never run apply on a PR — only validate (terraform-validate.yaml handles PRs)
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: vg-common
+  - name: TF_VERSION
+    value: 1.14.8
+  - name: TF_WORKING_DIR
+    value: infra
+  - name: TF_STORAGE_ACCOUNT
+    value: myprojectazshoptfstate
+  - name: TF_CONTAINER
+    value: tfstate
+
+stages:
+
+  # ══════════════════════════════════════════════════════════════
+  # Stage 1 — Apply to Dev (auto, no approval needed)
+  # ══════════════════════════════════════════════════════════════
+  - stage: ApplyDev
+    displayName: 'Terraform Apply — Dev'
+    jobs:
+      - deployment: TerraformApplyDev
+        displayName: 'Apply infra changes to dev'
+        environment: dev          # dev environment has no approval gate
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+
+                - checkout: self   # required inside deployment jobs
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform $(TF_VERSION)'
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                # terraform init — connects to the remote state in Azure Blob
+                # Each environment has its own state file (dev.tfstate)
+                - task: AzureCLI@2
+                  displayName: 'terraform init — dev'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      cd $(TF_WORKING_DIR)
+                      terraform init \
+                        -backend-config="key=dev.tfstate" \
+                        -backend-config="storage_account_name=$(TF_STORAGE_ACCOUNT)" \
+                        -backend-config="container_name=$(TF_CONTAINER)" \
+                        -backend-config="resource_group_name=$(RESOURCE_GROUP)"
+
+                # terraform plan — shows what will change, output saved for review
+                - task: AzureCLI@2
+                  displayName: 'terraform plan — dev'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      cd $(TF_WORKING_DIR)
+                      terraform plan \
+                        -var-file="environments/dev/terraform.tfvars" \
+                        -out=tfplan-dev \
+                        -no-color \
+                        2>&1 | tee plan-dev.txt
+                      echo "##vso[task.uploadsummary]$(pwd)/plan-dev.txt"
+                  env:
+                    TF_VAR_sql_admin_password: $(TF_VAR_SQL_ADMIN_PASSWORD)
+
+                # terraform apply — applies exactly the plan above (no surprises)
+                # -auto-approve is safe here because we planned first and
+                # we're applying from a saved plan file, not re-planning
+                - task: AzureCLI@2
+                  displayName: 'terraform apply — dev'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      cd $(TF_WORKING_DIR)
+                      terraform apply -auto-approve tfplan-dev
+                      echo "Dev infrastructure apply complete"
+                  env:
+                    TF_VAR_sql_admin_password: $(TF_VAR_SQL_ADMIN_PASSWORD)
+
+  # ══════════════════════════════════════════════════════════════
+  # Stage 2 — Apply to Staging (manual approval required)
+  # ══════════════════════════════════════════════════════════════
+  - stage: ApplyStaging
+    displayName: 'Terraform Apply — Staging'
+    dependsOn: ApplyDev           # only runs if dev apply succeeded
+    condition: succeeded()
+    jobs:
+      - deployment: TerraformApplyStaging
+        displayName: 'Apply infra changes to staging'
+        environment: staging      # staging environment has approval gate configured
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform $(TF_VERSION)'
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: AzureCLI@2
+                  displayName: 'terraform init — staging'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      cd $(TF_WORKING_DIR)
+                      terraform init \
+                        -backend-config="key=staging.tfstate" \
+                        -backend-config="storage_account_name=$(TF_STORAGE_ACCOUNT)" \
+                        -backend-config="container_name=$(TF_CONTAINER)" \
+                        -backend-config="resource_group_name=$(RESOURCE_GROUP)"
+
+                - task: AzureCLI@2
+                  displayName: 'terraform plan — staging'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      cd $(TF_WORKING_DIR)
+                      terraform plan \
+                        -var-file="environments/staging/terraform.tfvars" \
+                        -out=tfplan-staging \
+                        -no-color \
+                        2>&1 | tee plan-staging.txt
+                      echo "##vso[task.uploadsummary]$(pwd)/plan-staging.txt"
+                  env:
+                    TF_VAR_sql_admin_password: $(TF_VAR_SQL_ADMIN_PASSWORD)
+
+                - task: AzureCLI@2
+                  displayName: 'terraform apply — staging'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      cd $(TF_WORKING_DIR)
+                      terraform apply -auto-approve tfplan-staging
+                      echo "Staging infrastructure apply complete"
+                  env:
+                    TF_VAR_sql_admin_password: $(TF_VAR_SQL_ADMIN_PASSWORD)
+
+  # ══════════════════════════════════════════════════════════════
+  # Stage 3 — Apply to Prod (manual approval required)
+  # ══════════════════════════════════════════════════════════════
+  - stage: ApplyProd
+    displayName: 'Terraform Apply — Production'
+    dependsOn: ApplyStaging       # only runs if staging apply succeeded
+    condition: succeeded()
+    jobs:
+      - deployment: TerraformApplyProd
+        displayName: 'Apply infra changes to production'
+        environment: prod         # prod environment has approval gate configured
+        timeoutInMinutes: 120     # cancel if approval not given within 2 hours
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+
+                - checkout: self
+
+                - task: TerraformInstaller@1
+                  displayName: 'Install Terraform $(TF_VERSION)'
+                  inputs:
+                    terraformVersion: $(TF_VERSION)
+
+                - task: AzureCLI@2
+                  displayName: 'terraform init — prod'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      cd $(TF_WORKING_DIR)
+                      terraform init \
+                        -backend-config="key=prod.tfstate" \
+                        -backend-config="storage_account_name=$(TF_STORAGE_ACCOUNT)" \
+                        -backend-config="container_name=$(TF_CONTAINER)" \
+                        -backend-config="resource_group_name=$(RESOURCE_GROUP)"
+
+                - task: AzureCLI@2
+                  displayName: 'terraform plan — prod'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      cd $(TF_WORKING_DIR)
+                      terraform plan \
+                        -var-file="environments/prod/terraform.tfvars" \
+                        -out=tfplan-prod \
+                        -no-color \
+                        2>&1 | tee plan-prod.txt
+                      echo "##vso[task.uploadsummary]$(pwd)/plan-prod.txt"
+                  env:
+                    TF_VAR_sql_admin_password: $(TF_VAR_SQL_ADMIN_PASSWORD)
+
+                - task: AzureCLI@2
+                  displayName: 'terraform apply — prod'
+                  inputs:
+                    azureSubscription: sc-azureshop-azure
+                    scriptType: bash
+                    scriptLocation: inlineScript
+                    inlineScript: |
+                      cd $(TF_WORKING_DIR)
+                      terraform apply -auto-approve tfplan-prod
+                      echo "Production infrastructure apply complete"
+                  env:
+                    TF_VAR_sql_admin_password: $(TF_VAR_SQL_ADMIN_PASSWORD)

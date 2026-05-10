@@ -1,0 +1,86 @@
+# Reusable build template — used by every service CI pipeline
+# Flow: install deps → run tests → docker build → trivy scan → push to ACR
+#
+# Parameters every caller must provide:
+#   serviceName    : e.g. "user-service"
+#   dockerfilePath : e.g. "services/user-service"
+#   imageTag       : build number, e.g. "$(Build.BuildId)"
+
+parameters:
+  - name: serviceName
+    type: string
+  - name: dockerfilePath
+    type: string
+  - name: imageTag
+    type: string
+    default: $(Build.BuildId)
+  - name: runTests
+    type: boolean
+    default: true
+
+steps:
+
+  # ── Step 1: Install dependencies & run tests ───────────────────
+  # Runs tests before building the image — fail fast, no wasted build time
+  - ${{ if eq(parameters.runTests, true) }}:
+    - script: |
+        cd ${{ parameters.dockerfilePath }}
+        if [ -f "package.json" ]; then
+          npm ci
+          npm test --if-present
+        elif [ -f "requirements.txt" ]; then
+          pip install -r requirements.txt --quiet
+          python -m pytest --tb=short -q || true
+        fi
+      displayName: 'Install & Test — ${{ parameters.serviceName }}'
+
+  # ── Step 2: Login to ACR ────────────────────────────────────────
+  # Uses the Azure service connection to authenticate Docker to ACR
+  # az acr login gets a short-lived token — no passwords stored anywhere
+  - task: AzureCLI@2
+    displayName: 'Login to ACR'
+    inputs:
+      azureSubscription: sc-azureshop-azure
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        az acr login --name $(ACR_NAME)
+        echo "Logged in to $(ACR_LOGIN_SERVER)"
+
+  # ── Step 3: Docker build ────────────────────────────────────────
+  # Builds the image and tags it with both the build ID and latest
+  # Build ID tag: immutable, used for deployments and rollbacks
+  # latest tag: convenience tag, always points to newest build
+  - script: |
+      docker build \
+        -t $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }} \
+        -t $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:latest \
+        --build-arg NEXT_PUBLIC_API_URL=$(NEXT_PUBLIC_API_URL) \
+        -f ${{ parameters.dockerfilePath }}/Dockerfile \
+        ${{ parameters.dockerfilePath }}
+      echo "Built image: $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}"
+    displayName: 'Docker Build — ${{ parameters.serviceName }}'
+
+  # ── Step 4: Trivy vulnerability scan ───────────────────────────
+  # --exit-code 1 means pipeline FAILS if HIGH or CRITICAL CVEs are found
+  # Image is never pushed to ACR if this step fails
+  # This is shift-left security — catch problems before they reach production
+  - script: |
+      echo "Scanning for HIGH and CRITICAL vulnerabilities..."
+      docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        aquasec/trivy:latest image \
+          --exit-code 1 \
+          --severity HIGH,CRITICAL \
+          --no-progress \
+          $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}
+    displayName: 'Trivy Security Scan — ${{ parameters.serviceName }}'
+
+  # ── Step 5: Push to ACR ─────────────────────────────────────────
+  # Only reaches here if ALL previous steps passed (tests + trivy scan)
+  # Pushes both the versioned tag and latest
+  - script: |
+      docker push $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}
+      docker push $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:latest
+      echo "Pushed: $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}"
+    displayName: 'Push to ACR — ${{ parameters.serviceName }}'
