@@ -17,9 +17,9 @@ spec:
     spec:
       serviceAccountName: {{ include "azureshop.name" . }}
       securityContext:
-        runAsNonRoot: true
         seccompProfile:
           type: RuntimeDefault
+        # runAsNonRoot and runAsUser hardened in Phase 8 once UIDs are confirmed per image
       # Spread pods across nodes — prevents all replicas landing on one node
       topologySpreadConstraints:
         - maxSkew: 1
