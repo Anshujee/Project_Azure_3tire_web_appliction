@@ -1,0 +1,50 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "azureshop.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "azureshop.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "azureshop.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # Allow inbound traffic from the NGINX ingress controller
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+    # Allow inbound traffic from other pods in the same namespace
+    # (service-to-service calls e.g. api-gateway → user-service)
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  egress:
+    # Allow DNS — required for service discovery and Azure service resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow outbound to pods in the same namespace (service-to-service calls)
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ .Release.Namespace }}
+    # Allow outbound to Azure PaaS services (outside the cluster)
+    # SQL: 1433 | Key Vault / Cosmos DB / Service Bus HTTPS: 443
+    # Redis TLS: 6380 | Service Bus AMQP: 5671
+    - ports:
+        - port: 1433
+          protocol: TCP
+        - port: 443
+          protocol: TCP
+        - port: 6380
+          protocol: TCP
+        - port: 5671
+          protocol: TCP

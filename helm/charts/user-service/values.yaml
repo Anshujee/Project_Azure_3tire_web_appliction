@@ -1,0 +1,47 @@
+image:
+  repository: acrazureshopdev.azurecr.io/user-service
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  port: 3001
+  targetPort: 3001
+
+# Non-sensitive config — safe to put in values
+env:
+  - name: PORT
+    value: "3001"
+  - name: NODE_ENV
+    value: "production"
+  - name: DB_NAME
+    value: "db-users"
+
+# Key Vault CSI — injects SQL credentials as env vars
+secretProviderClass:
+  enabled: true
+  name: user-service-secrets      # SecretProviderClass resource name
+  secretName: user-service-secrets # Kubernetes Secret created by the CSI driver
+  # Injected env vars: SQL_SERVER, SQL_USER, SQL_PASSWORD
+
+probes:
+  path: /health
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+  cpuUtilizationPercentage: 70
+
+serviceAccount:
+  annotations: {}
+  # Phase 6.7 — add Workload Identity annotation here:
+  # azure.workload.identity/client-id: <managed-identity-client-id>

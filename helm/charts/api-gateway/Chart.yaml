@@ -1,0 +1,6 @@
+apiVersion: v2
+name: api-gateway
+description: AzureShop API Gateway — request routing and rate limiting (NGINX)
+type: application
+version: 0.1.0
+appVersion: "v1.0.0"

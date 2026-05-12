@@ -1,0 +1,49 @@
+image:
+  repository: acrazureshopdev.azurecr.io/order-service
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  port: 3004
+  targetPort: 3004
+
+env:
+  - name: PORT
+    value: "3004"
+  - name: NODE_ENV
+    value: "production"
+  - name: DB_NAME
+    value: "db-orders"
+  # Internal service URLs — resolved via Kubernetes DNS (service-name.namespace.svc.cluster.local)
+  - name: PAYMENT_SERVICE_URL
+    value: "http://payment-service:3005"
+  - name: NOTIFICATION_SERVICE_URL
+    value: "http://notification-service:3006"
+
+# Key Vault CSI — injects SQL credentials as env vars
+secretProviderClass:
+  enabled: true
+  name: order-service-secrets
+  secretName: order-service-secrets
+  # Injected env vars: SQL_SERVER, SQL_USER, SQL_PASSWORD
+
+probes:
+  path: /health
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+  cpuUtilizationPercentage: 70
+
+serviceAccount:
+  annotations: {}
