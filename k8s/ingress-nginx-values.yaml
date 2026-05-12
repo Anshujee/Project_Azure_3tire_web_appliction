@@ -1,0 +1,29 @@
+controller:
+  replicaCount: 2
+  nodeSelector:
+    kubernetes.io/os: linux
+  service:
+    annotations:
+      service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: /healthz
+  resources:
+    requests:
+      cpu: 100m
+      memory: 90Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+  podAntiAffinity:
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+          topologyKey: kubernetes.io/hostname
+  metrics:
+    enabled: true
+
+defaultBackend:
+  enabled: true
+  nodeSelector:
+    kubernetes.io/os: linux
