@@ -1,0 +1,44 @@
+image:
+  repository: acrazureshopdev.azurecr.io/product-service
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  port: 3002
+  targetPort: 3002
+
+env:
+  - name: PORT
+    value: "3002"
+  - name: COSMOS_DATABASE
+    value: "azureshop-db"
+  - name: COSMOS_CONTAINER
+    value: "products"
+
+# Key Vault CSI — injects Cosmos DB credentials as env vars
+secretProviderClass:
+  enabled: true
+  name: product-service-secrets
+  secretName: product-service-secrets
+  # Injected env vars: COSMOS_ENDPOINT, COSMOS_KEY
+
+probes:
+  path: /health
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+  cpuUtilizationPercentage: 70
+
+serviceAccount:
+  annotations: {}

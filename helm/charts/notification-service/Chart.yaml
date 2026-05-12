@@ -1,0 +1,6 @@
+apiVersion: v2
+name: notification-service
+description: AzureShop Notification Service — email/SMS via Service Bus events (Node.js)
+type: application
+version: 0.1.0
+appVersion: "v1.0.0"

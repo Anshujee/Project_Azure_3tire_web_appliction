@@ -1,0 +1,37 @@
+image:
+  repository: acrazureshopdev.azurecr.io/api-gateway
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  port: 8080
+  targetPort: 8080
+
+# NGINX is configured via nginx.conf baked into the image — no env vars needed
+env: []
+
+secretProviderClass:
+  enabled: false
+  name: ""
+  secretName: ""
+
+probes:
+  path: /health
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "64Mi"
+  limits:
+    cpu: "500m"
+    memory: "256Mi"
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+  cpuUtilizationPercentage: 70
+
+serviceAccount:
+  annotations: {}

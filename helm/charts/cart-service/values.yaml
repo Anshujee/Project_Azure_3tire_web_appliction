@@ -1,0 +1,42 @@
+image:
+  repository: acrazureshopdev.azurecr.io/cart-service
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  port: 3003
+  targetPort: 3003
+
+env:
+  - name: PORT
+    value: "3003"
+  - name: NODE_ENV
+    value: "production"
+
+# Key Vault CSI — injects Redis credentials as env vars
+secretProviderClass:
+  enabled: true
+  name: cart-service-secrets
+  secretName: cart-service-secrets
+  # Injected env vars: REDIS_HOST, REDIS_PORT, REDIS_PASSWORD
+
+probes:
+  path: /health
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+  cpuUtilizationPercentage: 70
+
+serviceAccount:
+  annotations: {}

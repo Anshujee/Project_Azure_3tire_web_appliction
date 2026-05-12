@@ -1,0 +1,45 @@
+image:
+  repository: acrazureshopdev.azurecr.io/frontend
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  port: 3000
+  targetPort: 3000
+
+env:
+  - name: PORT
+    value: "3000"
+  - name: NODE_ENV
+    value: "production"
+  # API Gateway URL — frontend calls this for all backend requests
+  # In-cluster DNS: http://<service-name>.<namespace>.svc.cluster.local:<port>
+  # Short form works within same namespace: http://api-gateway:8080
+  - name: NEXT_PUBLIC_API_URL
+    value: "http://api-gateway:8080"
+
+secretProviderClass:
+  enabled: false
+  name: ""
+  secretName: ""
+
+probes:
+  path: /health
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+  cpuUtilizationPercentage: 70
+
+serviceAccount:
+  annotations: {}
