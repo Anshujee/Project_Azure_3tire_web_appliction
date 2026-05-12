@@ -122,3 +122,13 @@ resource "azurerm_monitor_diagnostic_setting" "aks" {
     enabled  = true
   }
 }
+
+# ── Key Vault CSI Addon Role Assignment ───────────────────────────────────────
+# The Key Vault Secrets Provider addon uses its OWN managed identity to read
+# secrets — separate from the kubelet identity assigned in the keyvault module.
+# Without this, SecretProviderClass mounts will fail with 403 Forbidden.
+resource "azurerm_role_assignment" "csi_addon_kv_secrets_user" {
+  principal_id         = module.aks.addon_identity_object_id
+  role_definition_name = "Key Vault Secrets User"
+  scope                = module.keyvault.key_vault_id
+}

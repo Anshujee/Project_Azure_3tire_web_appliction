@@ -1,0 +1,34 @@
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: order-service-secrets
+  namespace: dev
+spec:
+  provider: azure
+  parameters:
+    usePodIdentity: "false"
+    useVMManagedIdentity: "true"
+    userAssignedIdentityID: "4e3f0c0a-9fee-4512-94fc-9d7eea9c96f3"
+    keyvaultName: "kv-azureshop-6a6c-dev"
+    tenantId: "4c135936-7e4d-4ea6-9816-7d696b51923d"
+    objects: |
+      array:
+        - |
+          objectName: sql-server-fqdn
+          objectType: secret
+        - |
+          objectName: sql-admin-username
+          objectType: secret
+        - |
+          objectName: sql-admin-password
+          objectType: secret
+  secretObjects:
+    - secretName: order-service-secrets
+      type: Opaque
+      data:
+        - objectName: sql-server-fqdn
+          key: SQL_SERVER
+        - objectName: sql-admin-username
+          key: SQL_USER
+        - objectName: sql-admin-password
+          key: SQL_PASSWORD

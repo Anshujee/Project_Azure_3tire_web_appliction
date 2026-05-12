@@ -28,3 +28,8 @@ output "node_resource_group" {
   description = "Auto-created resource group where AKS node VMs live"
   value       = azurerm_kubernetes_cluster.main.node_resource_group
 }
+
+output "addon_identity_object_id" {
+  description = "Object ID of the Key Vault Secrets Provider addon managed identity — used to grant Key Vault Secrets User role so CSI driver can read secrets"
+  value       = azurerm_kubernetes_cluster.main.key_vault_secrets_provider[0].secret_identity[0].object_id
+}
