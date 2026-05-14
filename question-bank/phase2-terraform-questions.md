@@ -17,6 +17,12 @@ Covers: Terraform state, locking, variables, locals, sensitive values, NSG, ASG,
 8. [What is Azure Bastion?](#q8-what-is-azure-bastion)
 9. [What is a Service Endpoint?](#q9-what-is-a-service-endpoint)
 10. [ACR Pull Role, Service Principal and Managed Identity](#q10-acr-pull-role-service-principal-and-managed-identity)
+11. [How Do You Design a High Availability Architecture?](#q11-how-do-you-design-a-high-availability-architecture)
+12. [What is Azure Active Directory (Azure AD)?](#q12-what-is-azure-active-directory-azure-ad)
+13. [How Are Secrets Managed — Terraform and Key Vault?](#q13-how-are-secrets-managed--terraform-and-key-vault)
+14. [What is RBAC?](#q14-what-is-rbac)
+15. [Difference Between for_each and for in Terraform](#q15-difference-between-for_each-and-for-in-terraform)
+16. [How Does Log Analytics Work? How is it Different From Prometheus?](#q16-how-does-log-analytics-work-how-is-it-different-from-prometheus)
 
 ---
 
@@ -906,5 +912,864 @@ Grafana (System Identity) → Monitoring Reader → reads Azure Monitor
 ### What `skip_service_principal_aad_check = true` Means
 
 Managed Identities take a few seconds to propagate in Azure AD after creation. Without this flag, Terraform would fail trying to assign a role before the identity fully exists. This flag tells Terraform: "Skip the AAD verification check — just assign the role, trust that the identity exists."
+
+---
+
+## Q11. How Do You Design a High Availability Architecture?
+
+### What is High Availability?
+
+High Availability (HA) means the system keeps running even when individual components fail. It is measured as uptime percentage:
+
+| Availability | Downtime per year |
+|---|---|
+| 99% | 3.65 days |
+| 99.9% ("three nines") | 8.7 hours |
+| 99.99% ("four nines") | 52 minutes |
+| 99.999% ("five nines") | 5 minutes |
+
+The goal: **eliminate single points of failure** — any one component that, if it fails, brings the whole system down.
+
+**Core principle:** Assume everything will fail eventually. Design so that when it does, the system keeps running.
+
+---
+
+### Pillar 1 — Redundancy (Multiple Copies of Everything)
+
+Never run a single instance of anything critical.
+
+**In AzureShop — Pod replicas:**
+```yaml
+# helm/values/prod.yaml
+replicaCount: 3       # 3 pods always running in prod
+hpa:
+  minReplicas: 3      # never go below 3
+  maxReplicas: 10     # scale up to 10 under load
+
+# helm/values/staging.yaml
+replicaCount: 2       # basic redundancy for testing
+
+# helm/values/dev.yaml
+replicaCount: 1       # cost saving — no HA needed in dev
+```
+
+If one pod dies, 2 are still serving traffic. Kubernetes restarts the dead pod in the background. Zero user impact.
+
+**AKS node pools:**
+```hcl
+node_count = var.system_node_count   # dev=1, prod=3
+```
+
+If one node dies, pods reschedule to surviving nodes automatically.
+
+---
+
+### Pillar 2 — Fault Domain Isolation (Availability Zones)
+
+A single data centre is a single point of failure — power outage, flood, fire. Azure Availability Zones are **physically separate data centres** within the same region.
+
+**AKS nodes spread across zones in prod:**
+```hcl
+default_node_pool {
+  zones = ["1", "2", "3"]  # spread nodes across 3 data centres
+  # removed in our dev setup — free tier limitation
+}
+```
+
+If Zone 1 has a power failure, nodes in Zone 2 and 3 keep running. Your 3 pod replicas (one per zone) means losing any zone still leaves 2 pods serving traffic.
+
+**Cosmos DB geo-replication:**
+```hcl
+resource "azurerm_cosmosdb_account" "main" {
+  automatic_failover_enabled = true
+  geo_location {
+    location          = "eastus"   # primary
+    failover_priority = 0
+  }
+  # prod: add secondary region
+  # geo_location { location = "westus2", failover_priority = 1 }
+}
+```
+
+If the entire East US region goes down, Cosmos DB automatically promotes the West US replica.
+
+---
+
+### Pillar 3 — Health Checks and Automatic Recovery
+
+**Liveness and Readiness probes:**
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 30
+  periodSeconds: 10
+  # If fails 3 times → Kubernetes RESTARTS the pod
+
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 3000
+  initialDelaySeconds: 10
+  periodSeconds: 5
+  # If fails → pod REMOVED from load balancer (no traffic sent to it)
+```
+
+- **Liveness** = "Is this pod alive?" — NO → restart it
+- **Readiness** = "Is this pod ready for traffic?" — NO → remove from LB, don't kill it
+
+**Warn-and-continue pattern (all 8 services):**
+```javascript
+try {
+  await connectToSQL();
+} catch (err) {
+  console.warn("SQL unavailable — starting in degraded mode");
+  // service starts anyway — prevents cascade failures
+}
+```
+
+---
+
+### Pillar 4 — Auto-Scaling
+
+```yaml
+# helm/charts/product-service/templates/hpa.yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+spec:
+  minReplicas: {{ .Values.hpa.minReplicas }}
+  maxReplicas: {{ .Values.hpa.maxReplicas }}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70   # scale up when CPU > 70%
+```
+
+Normal load: 3 pods. Traffic spike: CPU hits 70% → HPA adds pods up to 10. Spike over: scales back to 3. All automatic, zero human intervention.
+
+---
+
+### Pillar 5 — Zero-Downtime Deployments
+
+**PodDisruptionBudget:**
+```yaml
+kind: PodDisruptionBudget
+spec:
+  minAvailable: 1   # at least 1 pod must always be running
+```
+
+Prevents all pods being evicted at once during node maintenance.
+
+**RollingUpdate strategy:**
+```yaml
+strategy:
+  type: RollingUpdate
+  rollingUpdate:
+    maxSurge: 1        # create 1 new pod before killing old ones
+    maxUnavailable: 0  # never have fewer pods than desired count
+```
+
+At every step, at least the desired number of pods is serving traffic. Zero downtime during deployments.
+
+---
+
+### HA Summary Table
+
+| Layer | HA Mechanism | AzureShop Config |
+|---|---|---|
+| Compute | Multiple pod replicas + HPA | prod: 3 min → 10 max |
+| Node | Multi-node pools + zone spreading | system pool + user pool |
+| Deployment | RollingUpdate + PDB | maxUnavailable=0, minAvailable=1 |
+| Database | Cosmos DB auto-failover + geo-replication | automatic_failover_enabled=true |
+| Health | Liveness + readiness probes | all 8 services have /health |
+| Startup | Warn-and-continue pattern | services start in degraded mode |
+
+### Interview Answer Formula
+
+> "HA means eliminating single points of failure. I approach it at every layer — compute, data, networking, and deployment. In AzureShop, we run 3 pod replicas in prod with HPA scaling from 3 to 10 on CPU>70%. AKS nodes spread across availability zones. Cosmos DB has automatic failover. Every service has liveness and readiness probes, and uses a warn-and-continue startup pattern so one dependency outage doesn't cascade. RollingUpdate with maxUnavailable=0 gives zero-downtime deployments."
+
+---
+
+## Q12. What is Azure Active Directory (Azure AD)?
+
+### The Simplest Explanation
+
+Azure AD (now called **Microsoft Entra ID**) is the **security guard and receptionist for everything in Azure**. Every time anything tries to access any Azure resource, Azure AD answers:
+
+1. **Who are you?** (Authentication — verify identity)
+2. **Are you allowed to do this?** (Authorization — check permissions via RBAC)
+
+Without Azure AD, there is no security in Azure.
+
+**Analogy:** Azure AD = HR department + security office combined. HR keeps a register of everyone. Security checks the register before letting anyone through any door. Every door in the building = an Azure resource.
+
+---
+
+### Traditional AD vs Azure AD
+
+| | Traditional Active Directory | Azure Active Directory |
+|---|---|---|
+| Where it runs | On-premises (your own servers) | Cloud (Microsoft's servers) |
+| What it manages | Windows computers, printers, file shares | Cloud apps, Azure resources, Microsoft 365 |
+| Protocol | Kerberos, LDAP | OAuth 2.0, OpenID Connect, SAML |
+| Internet access? | No — internal network only | Yes — designed for internet |
+
+Traditional AD = guard for the office building's internal network. Azure AD = guard for everything in the cloud.
+
+---
+
+### Key Concepts
+
+**Tenant:** Your organisation's private isolated space in Azure AD.
+```
+Microsoft's Azure AD (global)
+├── Tenant: AzureShop (4c135936-...) ← YOUR space
+│     ├── Your users
+│     ├── Your Service Principals
+│     ├── Your Managed Identities
+│     └── Your groups and roles
+└── Tenant: Other companies (completely isolated)
+```
+
+**Identity Types:**
+
+| Identity | Example in AzureShop |
+|---|---|
+| User | Anshu (object ID: df0cac37-...) |
+| Service Principal | sp-azureshop-terraform |
+| Managed Identity | AKS kubelet identity, Grafana identity |
+| Group | "DevOps Team" |
+
+---
+
+### Authentication vs Authorization
+
+**Authentication** — "Who are you?"
+- Human: username + password + MFA
+- Service Principal: Client ID + Secret → Azure AD verifies → issues JWT token
+- Managed Identity: "I am AKS node" → Azure AD trusts (no password) → issues token
+
+**JWT Token** = a signed ticket proving identity. Valid for ~1 hour. Used for every API call instead of re-authenticating each time.
+
+**Authorization** — "Are you allowed to do this?" (handled by RBAC — see Q14)
+
+---
+
+### Azure AD in AzureShop — Every Usage
+
+**1. AKS kubectl access:**
+```hcl
+azure_active_directory_role_based_access_control {
+  tenant_id          = data.azurerm_client_config.current.tenant_id
+  azure_rbac_enabled = true
+}
+```
+Every `kubectl` command goes through Azure AD. Only users with `Azure Kubernetes Service RBAC Cluster Admin` role can run kubectl.
+
+**Why kubelogin?** Kubernetes normally uses its own username/password. With `azure_rbac_enabled = true`, it uses Azure AD instead. `kubelogin` bridges the gap — converts kubeconfig to use your `az login` session.
+
+**2. Azure SQL Azure AD Admin:**
+```hcl
+azuread_administrator {
+  login_username              = "AzureAD Admin"
+  object_id                   = var.sql_admin_object_id
+  azuread_authentication_only = false
+}
+```
+You can log into SQL Server using your Azure AD identity instead of SQL username/password.
+
+**3. Key Vault RBAC:**
+```hcl
+rbac_authorization_enabled = true
+```
+Key Vault uses Azure AD RBAC instead of its legacy Access Policies. One consistent permission system across everything.
+
+**4. All Managed Identities** are registered in Azure AD automatically when created.
+
+---
+
+### Why Azure AD Instead of Passwords Everywhere?
+
+| Problem | Azure AD Solution |
+|---|---|
+| Passwords can be leaked | Managed Identities have no password |
+| Passwords expire and must be rotated | Tokens auto-renew |
+| Different auth systems per service | One identity system for everything |
+| No audit trail | Azure AD logs every authentication |
+| Hard to revoke access | Disable identity in Azure AD → revoked everywhere instantly |
+
+---
+
+## Q13. How Are Secrets Managed — Terraform and Key Vault?
+
+### The Golden Rule
+
+**A secret that touches a file or a log is no longer a secret.**
+
+### Three Stages
+
+---
+
+### Stage 1 — Terraform Creates Key Vault and Writes Secrets IN
+
+**Key Vault creation:**
+```hcl
+resource "azurerm_key_vault" "main" {
+  name                       = "kv-azureshop-6a6c-dev"
+  rbac_authorization_enabled = true    # Azure AD RBAC (not legacy access policies)
+  soft_delete_retention_days = 90      # secrets recoverable for 90 days after deletion
+  purge_protection_enabled   = true    # even admins cannot permanently delete during 90 days
+
+  network_acls {
+    default_action = "Allow"           # dev: open; prod: "Deny" (VNet only)
+    bypass         = "AzureServices"   # Azure Monitor, Pipelines always allowed
+  }
+}
+```
+
+**`soft_delete_retention_days = 90`** — accidental deletion lands in a recycle bin, recoverable for 90 days. This is why our Key Vault survived when we destroyed all infra — it went into soft-delete, not permanent deletion.
+
+**Terraform grants itself write permission:**
+```hcl
+data "azurerm_client_config" "current" {}   # who is running terraform right now?
+
+resource "azurerm_role_assignment" "terraform_secrets_officer" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets Officer"   # read + write + delete
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+```
+
+`data "azurerm_client_config" "current"` — reads whoever is authenticated. Whether you run Terraform locally (your user) or via pipeline (service principal), this picks up the right identity automatically.
+
+**Terraform writes secrets:**
+```hcl
+resource "azurerm_key_vault_secret" "sql_admin_password" {
+  name         = "sql-admin-password"
+  value        = var.sql_admin_password    # came from TF_VAR_ env var
+  key_vault_id = azurerm_key_vault.main.id
+
+  depends_on = [azurerm_role_assignment.terraform_secrets_officer]
+  # CRITICAL — wait for role propagation in Azure AD before writing
+  # Without this: "permission denied" timing error during apply
+}
+```
+
+**All 8 secrets written:**
+```
+Key Vault: kv-azureshop-6a6c-dev
+├── sql-server-fqdn
+├── sql-admin-username
+├── sql-admin-password       ← came from TF_VAR_sql_admin_password
+├── cosmos-endpoint
+├── cosmos-primary-key
+├── redis-hostname
+├── redis-ssl-port
+└── redis-primary-access-key
+```
+
+---
+
+### Stage 2 — Key Vault Stores Secrets Securely
+
+```
+Encryption at rest:    Every secret encrypted by Microsoft-managed keys
+Encryption in transit: HTTPS only
+Access logging:        Every read/write logged in Azure Monitor
+RBAC gating:          Must have correct role — anonymous access impossible
+Soft delete:          90 day recovery window
+Purge protection:     Cannot permanently delete during retention period
+```
+
+**Three roles on Key Vault:**
+
+| Identity | Role | What They Can Do |
+|---|---|---|
+| Terraform SP | Secrets Officer | Write secrets during apply |
+| Azure DevOps SP | Secrets Officer | Update secrets from pipelines |
+| AKS CSI Identity | Secrets User (read-only) | Pods can only read — never write |
+
+---
+
+### Stage 3 — Pods Read Secrets OUT via CSI Driver
+
+**SecretProviderClass (the bridge):**
+```yaml
+# k8s/secret-provider-classes/user-service.yaml
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+spec:
+  provider: azure
+  parameters:
+    useVMManagedIdentity: "true"
+    userAssignedIdentityID: "4e3f0c0a-..."   # CSI addon Managed Identity
+    keyvaultName: "kv-azureshop-6a6c-dev"
+    objects: |
+      array:
+        - objectName: sql-server-fqdn
+          objectType: secret
+        - objectName: sql-admin-password
+          objectType: secret
+  secretObjects:
+    - secretName: user-service-secrets     # creates a Kubernetes Secret
+      data:
+        - objectName: sql-server-fqdn
+          key: SQL_SERVER                  # env var name inside pod
+        - objectName: sql-admin-password
+          key: SQL_PASSWORD
+```
+
+**Helm Deployment mounts it:**
+```yaml
+containers:
+  - name: user-service
+    envFrom:
+      - secretRef:
+          name: user-service-secrets   # all env vars from K8s Secret
+    volumeMounts:
+      - name: secrets-store
+        mountPath: /mnt/secrets-store
+        readOnly: true
+volumes:
+  - name: secrets-store
+    csi:
+      driver: secrets-store.csi.k8s.io
+      volumeAttributes:
+        secretProviderClass: user-service-secrets
+```
+
+**Complete secret journey:**
+```
+TF_VAR_sql_admin_password (env var, never in file)
+    ↓ terraform apply
+Key Vault (encrypted, RBAC-gated)
+    ↓ CSI Driver (Managed Identity — no password)
+Kubernetes Secret "user-service-secrets"
+    ↓ envFrom
+Pod environment variable SQL_PASSWORD
+    ↓ process.env.SQL_PASSWORD
+SQL Server connection
+```
+
+The password **never** appeared in any code file, Git commit, pipeline log, or was typed by a human after initial setup.
+
+---
+
+## Q14. What is RBAC?
+
+### The Formula
+
+```
+WHO  +  WHAT ROLE  +  WHERE SCOPE  =  PERMISSION
+```
+
+**Analogy:** A hospital. Doctor = read + write patient records. Nurse = read only. Receptionist = see appointments only. Same building, different roles, different access.
+
+---
+
+### The Three Components
+
+**1. Security Principal — WHO:**
+User, Group, Service Principal, Managed Identity
+
+**2. Role Definition — WHAT:**
+
+| Role | Permissions |
+|---|---|
+| Owner | Everything + manage access |
+| Contributor | Create/modify/delete — cannot manage access |
+| Reader | View only |
+| AcrPull | Pull images from ACR only |
+| Key Vault Secrets User | Read secret values only |
+| Key Vault Secrets Officer | Read + write + delete secrets |
+| Monitoring Reader | Read metrics and logs only |
+| AKS RBAC Cluster Admin | Full kubectl access |
+
+**3. Scope — WHERE:**
+```
+Subscription  (everything below inherits)
+    └── Resource Group
+            └── Resource  (narrowest — most specific)
+```
+
+Role at subscription level = applies to ALL resources below it.
+Role at one specific resource = applies only to that resource.
+
+---
+
+### Every RBAC Assignment in AzureShop
+
+| Principal | Role | Scope | Why |
+|---|---|---|---|
+| sp-azureshop-terraform | Contributor | Subscription | Terraform creates all resources |
+| sp-azureshop-terraform | Key Vault Secrets Officer | kv-azureshop-6a6c-dev | Writes secrets during apply |
+| AKS kubelet identity | AcrPull | acrazureshopdev | Nodes pull Docker images |
+| AKS CSI addon identity | Key Vault Secrets User | kv-azureshop-6a6c-dev | CSI reads secrets (read-only) |
+| Azure DevOps SP | Key Vault Secrets Officer | kv-azureshop-6a6c-dev | Pipelines update secrets |
+| Grafana identity | Monitoring Reader | Subscription | Read metrics across all resources |
+| Anshu (user) | AKS RBAC Cluster Admin | aks-azureshop-dev | Run kubectl commands |
+
+---
+
+### Key Vault Special Rule
+
+**Contributor does NOT give access to Key Vault secrets.** Key Vault has its own RBAC plane.
+- Contributor = manage the vault resource itself (create/delete the vault)
+- Key Vault Secrets Officer = read/write/delete secrets inside the vault
+- Both assignments are needed separately
+
+---
+
+### AKS — Two Levels of RBAC
+
+**Level 1 — Azure RBAC (who can use kubectl):**
+```hcl
+azure_active_directory_role_based_access_control {
+  azure_rbac_enabled = true
+}
+```
+Controls who can run `kubectl` commands at all. Managed by Azure AD.
+
+**Level 2 — Kubernetes RBAC (what kubectl can do inside cluster):**
+`Role`, `ClusterRole`, `RoleBinding`, `ClusterRoleBinding` Kubernetes objects.
+Controls what Kubernetes operations are allowed inside the cluster.
+
+---
+
+### Principle of Least Privilege
+
+Give minimum permission at narrowest scope:
+```
+❌ WRONG: AKS kubelet identity → Owner → Subscription
+          (nodes could delete the entire subscription)
+
+✅ CORRECT: AKS kubelet identity → AcrPull → specific ACR only
+            (nodes can only pull from one registry)
+```
+
+---
+
+## Q15. Difference Between for_each and for in Terraform
+
+### One-Line Summary
+
+| | `for_each` | `for` |
+|---|---|---|
+| What it does | Creates multiple Azure **resources** | Transforms a collection into a new **value** |
+| Where it lives | On a resource/dynamic block | Inside a `value =` expression |
+| Analogy | Photocopier — copies template per item | Spreadsheet formula — transforms data |
+
+---
+
+### `for_each` — Creates Multiple Resources
+
+**Without `for_each` — 8 identical blocks:**
+```hcl
+resource "azurerm_application_insights" "frontend"       { name = "appi-frontend-dev"      ... }
+resource "azurerm_application_insights" "user_service"   { name = "appi-user-service-dev"  ... }
+resource "azurerm_application_insights" "cart_service"   { name = "appi-cart-service-dev"  ... }
+# ...5 more identical blocks
+```
+
+**With `for_each` — one block creates 8 resources:**
+```hcl
+# infra/modules/monitoring/main.tf — ACTUAL PROJECT CODE
+resource "azurerm_application_insights" "services" {
+  for_each = toset(var.services)   # var.services = list of 8 service names
+
+  name             = "appi-${each.key}-${var.environment}"
+  application_type = each.key == "product-service" ? "other" : "web"
+  workspace_id     = azurerm_log_analytics_workspace.main.id
+}
+```
+
+**`var.services`:**
+```hcl
+default = ["frontend", "api-gateway", "user-service", "product-service",
+           "cart-service", "order-service", "payment-service", "notification-service"]
+```
+
+**What Terraform creates:**
+```
+azurerm_application_insights.services["frontend"]           → appi-frontend-dev
+azurerm_application_insights.services["user-service"]       → appi-user-service-dev
+azurerm_application_insights.services["product-service"]    → appi-product-service-dev
+# ... 5 more
+```
+
+8 real Azure resources from 1 resource block.
+
+**`each.key` and `each.value`:**
+- When input is a set: `each.key = each.value = the item` ("user-service")
+- When input is a map: `each.key = map key`, `each.value = map value`
+
+**`toset()` — Why needed?**
+`for_each` requires a set or map — NOT a plain list. `toset()` converts list → set, removes duplicates, sorts alphabetically.
+
+**`for_each` on dynamic blocks (conditional include):**
+```hcl
+# infra/modules/aks/main.tf
+dynamic "oms_agent" {
+  for_each = var.log_analytics_workspace_id != null ? [1] : []
+  # [1] = include this block once
+  # []  = skip this block entirely (conditional)
+  content {
+    log_analytics_workspace_id = var.log_analytics_workspace_id
+  }
+}
+```
+
+---
+
+### `for` — Transforms Values
+
+**Real example from our project:**
+```hcl
+# infra/modules/monitoring/outputs.tf
+output "application_insights_keys" {
+  value = { for svc, appi in azurerm_application_insights.services : svc => appi.instrumentation_key }
+}
+```
+
+Breaking it down:
+```
+{ for svc,   appi   in azurerm_application_insights.services : svc  =>  appi.instrumentation_key }
+       ↑      ↑                    ↑                            ↑              ↑
+    key var  val var          the 8 resources                output key    output value
+```
+
+**What this produces:**
+```hcl
+{
+  "frontend"             = "abc123-key"
+  "user-service"         = "def456-key"
+  "product-service"      = "ghi789-key"
+  # ...5 more
+}
+```
+
+A single map output with all 8 keys. Without `for`, you'd need 8 separate output blocks.
+
+**Other `for` patterns:**
+```hcl
+# Transform a list
+[for env in var.environments : "env-${env}"]
+# ["dev"] → ["env-dev"]
+
+# Filter with if
+[for svc in var.all_names : svc if strcontains(svc, "service")]
+# → ["user-service", "product-service", ...]
+
+# Transform a map
+{ for env, loc in var.env_locations : env => upper(loc) }
+# { "dev" = "eastus" } → { "dev" = "EASTUS" }
+```
+
+---
+
+### When to Use Which
+
+| Use Case | Tool |
+|---|---|
+| Create one Azure resource per item | `for_each` on resource |
+| Conditionally include/skip a config block | `for_each` on dynamic block |
+| Transform a list into a new list | `for` expression |
+| Build a map from multiple resources | `for` expression |
+| Filter items from a collection | `for` with `if` |
+
+---
+
+## Q16. How Does Log Analytics Work? How is it Different From Prometheus?
+
+### What is Log Analytics?
+
+Log Analytics (part of **Azure Monitor**) is the **central brain for all your logs and metrics**. Every Azure resource generates logs and metrics. Log Analytics pulls all of them into one place where you can search, analyse, and alert.
+
+**Analogy:** 50 employees in 10 departments each keep their own records. Log Analytics = central HR system where every department automatically sends their records. Query one system, get the full picture.
+
+---
+
+### Mind Map
+
+```
+                    ┌─────────────────────────────────────┐
+                    │       LOG ANALYTICS WORKSPACE        │
+                    │         (law-azureshop-dev)          │
+                    │   Central store for logs + metrics   │
+                    └──────────────┬──────────────────────┘
+                                   │
+       ┌──────────────┬────────────┼────────────┬──────────────┐
+       │              │            │            │              │
+ ┌─────▼─────┐  ┌─────▼────┐ ┌────▼──────┐ ┌───▼──────┐ ┌────▼──────┐
+ │    AKS    │  │   App    │ │Diagnostic │ │ Grafana  │ │   KQL     │
+ │ Container │  │ Insights │ │ Settings  │ │Dashboard │ │  Query    │
+ │ Insights  │  │  (x8)    │ │(AKS logs) │ │          │ │ Language  │
+ └─────┬─────┘  └─────┬────┘ └────┬──────┘ └───┬──────┘ └────┬──────┘
+       │               │           │             │              │
+ Node CPU/Mem    Req traces   API server    Dashboards    ContainerLog
+ Pod restarts    Error rates  Audit logs    Alerts        | where "ERROR"
+ Container logs  Custom events Scheduler   Visualise      Perf | summarize
+```
+
+---
+
+### Three Ways Data Gets INTO Log Analytics
+
+**Way 1 — Container Insights (OMS Agent DaemonSet):**
+```hcl
+# infra/modules/aks/main.tf
+dynamic "oms_agent" {
+  for_each = var.log_analytics_workspace_id != null ? [1] : []
+  content {
+    log_analytics_workspace_id = var.log_analytics_workspace_id
+  }
+}
+```
+
+Installs a **DaemonSet** (pod on every node) that auto-collects:
+```
+From every node:   CPU, memory, disk I/O, network
+From every pod:    CPU, memory, restart count, stdout/stderr logs
+From Kubernetes:   Pod status, deployment health, node status
+```
+Zero code changes in your application needed.
+
+**Way 2 — Diagnostic Settings (Azure Platform Logs):**
+```hcl
+# infra/main.tf
+resource "azurerm_monitor_diagnostic_setting" "aks" {
+  target_resource_id         = module.aks.aks_cluster_id
+  log_analytics_workspace_id = module.monitoring.log_analytics_workspace_id
+
+  enabled_log { category = "kube-apiserver" }          # API server requests
+  enabled_log { category = "kube-controller-manager" } # deployment reconciliation
+  enabled_log { category = "kube-scheduler" }          # pod scheduling decisions
+  enabled_log { category = "kube-audit" }              # every kubectl command ever run
+  enabled_log { category = "cluster-autoscaler" }      # scale up/down decisions
+
+  metric { category = "AllMetrics" enabled = true }    # CPU, memory, pod counts
+}
+```
+
+`kube-audit` logs every `kubectl` command — who ran it, when, from which IP. Critical for security auditing.
+
+**Why in `main.tf` not AKS module?** Circular dependency — monitoring module creates workspace, AKS module creates cluster, diagnostic setting links both. Placing it in root `main.tf` breaks the circular dependency.
+
+**Way 3 — Application Insights (App-Level Telemetry):**
+```hcl
+# infra/modules/monitoring/main.tf
+resource "azurerm_application_insights" "services" {
+  for_each     = toset(var.services)   # one per each of 8 services
+  workspace_id = azurerm_log_analytics_workspace.main.id  # sends data here
+}
+```
+
+Collects:
+```
+HTTP request tracing:    Every request, status code, duration, slow requests
+Dependency tracking:     Every SQL query, Redis call, inter-service HTTP call
+Custom events:           "User placed order", "Payment failed"
+Exceptions:              Full stack trace of every unhandled error
+```
+
+All 8 App Insights instances feed the **same** Log Analytics workspace — one KQL query can join app logs with infrastructure logs.
+
+---
+
+### KQL — Querying Log Analytics
+
+KQL (Kusto Query Language) = like SQL but designed for log data.
+
+```kql
+// Find all pod restarts in the last hour
+KubePodInventory
+| where TimeGenerated > ago(1h)
+| where PodRestartCount > 0
+| project PodName, Namespace, PodRestartCount
+| order by PodRestartCount desc
+
+// Find ERROR logs from user-service
+ContainerLog
+| where TimeGenerated > ago(24h)
+| where ContainerName contains "user-service"
+| where LogEntry contains "ERROR"
+| project TimeGenerated, ContainerName, LogEntry
+
+// Average CPU per node (last 6 hours)
+Perf
+| where TimeGenerated > ago(6h)
+| where ObjectName == "K8SNode"
+| summarize AvgCPU = avg(CounterValue) by Computer, bin(TimeGenerated, 5m)
+| render timechart
+```
+
+---
+
+### Grafana + Log Analytics
+
+```hcl
+resource "azurerm_dashboard_grafana" "main" {
+  identity { type = "SystemAssigned" }
+}
+
+resource "azurerm_role_assignment" "grafana_monitor_reader" {
+  role_definition_name = "Monitoring Reader"
+  principal_id         = azurerm_dashboard_grafana.main.identity[0].principal_id
+}
+```
+
+Grafana uses its Managed Identity (Monitoring Reader role) to query Log Analytics. No password or API key needed — pure identity-based auth.
+
+---
+
+### Log Analytics vs Prometheus
+
+**Prometheus — The Pull Model (Open Source):**
+```
+Prometheus ──scrapes every 15s──► Pod /metrics endpoint
+Stores in own TSDB (time-series database on disk)
+Query with PromQL
+Need Alertmanager separately for alerts
+Collects metrics ONLY — no logs
+```
+
+**Log Analytics — The Push Model (Azure-Native):**
+```
+AKS + App Insights + Diagnostic Settings ──push──► Log Analytics
+Microsoft-managed storage (unlimited retention)
+Query with KQL
+Built-in alerts via Azure Monitor
+Collects logs AND metrics AND traces
+```
+
+**Head-to-Head:**
+
+| Feature | Log Analytics | Prometheus |
+|---|---|---|
+| Model | Push — resources send data in | Pull — scrapes /metrics endpoint |
+| Data types | Logs + Metrics + Traces | Metrics only |
+| Query language | KQL | PromQL |
+| Storage | Microsoft-managed | Self-managed TSDB |
+| Cost | Pay per GB ingested | Free (you pay for infra) |
+| Azure integration | Native — built into every Azure service | Manual — need exporters |
+| Log collection | Yes — container stdout/stderr | No — need Loki separately |
+| Who manages it | Microsoft | You |
+| Multi-cloud | Azure only | Cloud-agnostic |
+
+**When to use which:**
+
+| Situation | Use |
+|---|---|
+| Azure-native infra, want zero-ops | Log Analytics |
+| Need logs + metrics + traces in one place | Log Analytics + App Insights |
+| Multi-cloud (Azure + AWS + GCP) | Prometheus |
+| Kubernetes-native tooling (Helm operators) | Prometheus (kube-prometheus-stack) |
+| Compliance, long-term log retention | Log Analytics |
+
+In AzureShop we use Log Analytics — everything is Azure-native, zero Prometheus setup needed.
 
 ---
