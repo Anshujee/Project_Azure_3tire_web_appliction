@@ -146,3 +146,17 @@ resource "azurerm_key_vault_secret" "redis_primary_access_key" {
 
   depends_on = [azurerm_role_assignment.terraform_secrets_officer]
 }
+
+# ── Application Insights Connection Strings ────
+# for_each creates one secret per service: appinsights-<service>-cs
+# Matches the objectName used in each SecretProviderClass YAML
+resource "azurerm_key_vault_secret" "appinsights_connection_strings" {
+  for_each = var.application_insights_connection_strings
+
+  name         = "appinsights-${each.key}-cs"
+  value        = each.value
+  key_vault_id = azurerm_key_vault.main.id
+  tags         = var.tags
+
+  depends_on = [azurerm_role_assignment.terraform_secrets_officer]
+}

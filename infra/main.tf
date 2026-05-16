@@ -75,6 +75,10 @@ module "keyvault" {
   redis_ssl_port           = module.databases.redis_ssl_port
   redis_primary_access_key = module.databases.redis_primary_access_key
 
+  # App Insights connection strings from monitoring module — stored as Key Vault secrets
+  # so CSI driver can inject them into pods as APPINSIGHTS_CONNECTION_STRING env var
+  application_insights_connection_strings = module.monitoring.application_insights_connection_strings
+
   network_default_action = var.keyvault_network_default_action
 }
 
