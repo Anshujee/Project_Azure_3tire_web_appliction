@@ -35,6 +35,9 @@ By the end of this phase you will understand: what Kubernetes is and why we use 
 20. [Commands Reference](#20-commands-reference)
 21. [Full Step-by-Step Summary](#21-full-step-by-step-summary)
 22. [Interview Questions and Answers](#22-interview-questions-and-answers)
+23. [Workload Identity — OIDC and Federated Credentials](#23-workload-identity--oidc-and-federated-credentials)
+24. [Real Implementation Issues Encountered](#24-real-implementation-issues-encountered)
+25. [Additional Interview Questions — Steps 6.5 to 6.8](#25-additional-interview-questions--steps-65-to-68)
 
 ---
 
@@ -1189,6 +1192,157 @@ for svc in user-service product-service cart-service order-service \
     --push \
     services/$svc/
 done
+
+# Check image architecture after push
+docker inspect acrazureshopdev.azurecr.io/user-service:v1.0.0 | grep Architecture
+# Should show: amd64
+
+# Force Kubernetes to pull the new image (when tag is unchanged)
+kubectl rollout restart deployment/api-gateway -n dev
+```
+
+### Step 6.5 — Ingress Routing
+
+```bash
+# Apply ingress routing rules for dev namespace
+kubectl apply -f k8s/ingress/dev-ingress.yaml
+
+# Verify ingress object was created and received an external address
+kubectl get ingress -n dev
+# Expected output:
+# NAME                CLASS   HOSTS   ADDRESS          PORTS   AGE
+# azureshop-ingress   nginx   *       134.33.223.224   80      5m
+
+# Test frontend route via port-forward (bypasses NSG for local testing)
+kubectl port-forward -n ingress-nginx svc/nginx-ingress-ingress-nginx-controller 8088:80 &
+curl -s -o /dev/null -w "HTTP %{http_code}\n" http://localhost:8088/
+curl -s http://localhost:8088/api/health
+# Kill the port-forward when done
+kill %1
+
+# Test routing from inside the cluster
+kubectl run curl-test --image=curlimages/curl:latest --restart=Never --rm -n dev \
+  --command -- sh -c \
+  "curl -s -o /dev/null -w 'Frontend: HTTP %{http_code}\n' http://frontend:3000/ && \
+   curl -s http://frontend:3000/api/health && echo '' && \
+   curl -s -o /dev/null -w 'API-GW: HTTP %{http_code}\n' http://api-gateway:8080/"
+```
+
+### Step 6.6 — Network Policies
+
+```bash
+# List all network policies in dev namespace
+kubectl get networkpolicy -n dev
+
+# Describe a specific network policy to see its rules
+kubectl describe networkpolicy user-service -n dev
+
+# Test ALLOWED traffic: pod in dev → user-service (should work)
+kubectl run curl-allowed --image=curlimages/curl:latest --restart=Never --rm -n dev \
+  --command -- curl -s -o /dev/null -w "HTTP %{http_code}\n" http://user-service:3001/health
+
+# Test BLOCKED traffic: pod in staging → user-service in dev (should time out)
+kubectl run curl-blocked --image=curlimages/curl:latest --restart=Never --rm -n staging \
+  --command -- curl --max-time 5 -s -o /dev/null -w "HTTP %{http_code}\n" \
+  http://user-service.dev.svc.cluster.local:3001/health
+# Expected: HTTP 000 (connection refused/timed out)
+```
+
+### Step 6.7 — Workload Identity
+
+```bash
+# Check if OIDC issuer is enabled on the AKS cluster
+az aks show --name aks-azureshop-dev --resource-group rg-azureshop-dev \
+  --query "oidcIssuerProfile" -o json
+
+# Check if Workload Identity is enabled
+az aks show --name aks-azureshop-dev --resource-group rg-azureshop-dev \
+  --query "securityProfile.workloadIdentity" -o json
+
+# Get the managed identity client ID (needed for Helm values)
+az identity show \
+  --name "id-notification-service-dev" \
+  --resource-group "rg-azureshop-dev" \
+  --query "clientId" -o tsv
+
+# Force-unlock a stale Terraform state lock
+terraform force-unlock -force <lock-id>
+
+# Import an existing resource into Terraform state (avoids recreate)
+terraform import \
+  -var-file="environments/dev/terraform.tfvars" \
+  azurerm_federated_identity_credential.notification_service \
+  "/subscriptions/<sub>/resourceGroups/rg-azureshop-dev/providers/Microsoft.ManagedIdentity/userAssignedIdentities/id-notification-service-dev/federatedIdentityCredentials/fic-notification-service-dev"
+
+# Apply Workload Identity Terraform changes
+export TF_VAR_sql_admin_password="..."
+terraform apply -var-file="environments/dev/terraform.tfvars" -auto-approve
+
+# Upgrade notification-service Helm chart with Workload Identity settings
+helm upgrade notification-service helm/charts/notification-service/ \
+  --namespace dev \
+  --values helm/charts/notification-service/values.yaml
+
+# Verify rollout completes successfully
+kubectl rollout status deployment/notification-service -n dev
+
+# Verify Workload Identity env vars were injected by the webhook
+kubectl exec -n dev deployment/notification-service -- env | grep AZURE
+# Expected:
+# AZURE_CLIENT_ID=2e5e41cb-dd6c-46a5-8420-165c463fe974
+# AZURE_FEDERATED_TOKEN_FILE=/var/run/secrets/azure/tokens/azure-identity-token
+# AZURE_AUTHORITY_HOST=https://login.microsoftonline.com/
+
+# Verify the ServiceAccount has the annotation
+kubectl get serviceaccount notification-service -n dev -o jsonpath='{.metadata.annotations}'
+
+# Verify the pod has the Workload Identity label
+kubectl get pod <notification-service-pod> -n dev -o jsonpath='{.metadata.labels}'
+```
+
+### Step 6.8 — End-to-End Verification
+
+```bash
+# Full pod status check
+kubectl get pods -n dev -o wide
+
+# Check services
+kubectl get svc -n dev
+
+# Check HPA (all should show actual CPU metrics, not <unknown>)
+kubectl get hpa -n dev
+
+# Check all network policies
+kubectl get networkpolicy -n dev
+
+# Check ingress
+kubectl get ingress -n dev
+
+# Verify CSI secrets are mounted inside a pod
+kubectl exec -n dev deployment/user-service -- ls /mnt/secrets-store
+
+# Verify env vars injected from Key Vault
+kubectl exec -n dev deployment/user-service -- env | grep -E "SQL|COSMOS|REDIS"
+
+# Test SQL server TCP reachability from inside a pod
+kubectl exec -n dev deployment/user-service -- \
+  sh -c "nc -zv sql-azureshop-dev.database.windows.net 1433"
+# Expected: Connection open
+
+# Run health checks on all services from inside the cluster
+kubectl run curl-test --image=curlimages/curl:latest --restart=Never --rm -n dev \
+  --command -- sh -c "
+    echo '=== Frontend ===' && curl -s http://frontend:3000/api/health && echo '' &&
+    echo '=== API Gateway ===' && curl -s -o /dev/null -w 'HTTP %{http_code}\n' http://api-gateway:8080/ &&
+    echo '=== User Service ===' && curl -s http://user-service:3001/health && echo '' &&
+    echo '=== Product Service ===' && curl -s http://product-service:3002/health && echo '' &&
+    echo '=== Cart Service ===' && curl -s http://cart-service:3003/health && echo '' &&
+    echo '=== Order Service ===' && curl -s http://order-service:3004/health && echo '' &&
+    echo '=== Notification Service ===' && curl -s http://notification-service:3006/health
+  "
+
+# Check recent events in dev namespace (useful for diagnosing issues)
+kubectl get events -n dev --sort-by='.lastTimestamp' | tail -20
 ```
 
 ---
@@ -1220,15 +1374,90 @@ done
 4. Created `helm/values/dev.yaml`, `staging.yaml`, `prod.yaml`.
 5. Ran `helm lint` on all 8 charts — all passed.
 
-### Step 6.4 — Deploy Services (BLOCKED — ARM64 issue)
+### Step 6.4 — Deploy Services
 
 1. Deployed all 8 services with `helm upgrade --install ... -f helm/values/dev.yaml`.
 2. All Helm releases: `STATUS: deployed`.
-3. Pods started in `CreateContainerConfigError` — runAsNonRoot mismatch with NGINX and string-UID images.
-4. Fixed: removed `runAsNonRoot: true`, propagated fix to all 8 charts.
-5. Pods moved to `CrashLoopBackOff` — `exec format error`.
-6. Root cause identified: ARM64 images on AMD64 nodes.
-7. Fix identified (not yet applied): rebuild with `--platform linux/amd64`.
+3. Pods started in `CreateContainerConfigError` — `runAsNonRoot: true` rejected NGINX (runs as root) and string-UID images (`USER nodejs`). Fixed by removing `runAsNonRoot: true` from all 8 charts.
+4. Pods moved to `CrashLoopBackOff` — `exec format error`. Root cause: Docker images were built on Apple Silicon (ARM64) but AKS nodes are AMD64.
+5. Created `docker buildx` multi-platform builder. Rebuilt all 8 images with `--platform linux/amd64`. Pushed to ACR.
+6. api-gateway pods failed with `chown /var/cache/nginx: Operation not permitted` — the standard `nginx:alpine` image requires root to set up cache directories. Switched to `nginxinc/nginx-unprivileged:1.27-alpine`. Bumped image tag to `v1.0.1`.
+7. api-gateway still failing with `open /run/nginx.pid: Permission denied` — unprivileged NGINX cannot write the PID file to `/run/`. Added `pid /tmp/nginx.pid` and all temp path overrides to `nginx.conf`. Bumped image tag to `v1.0.2`.
+8. frontend readiness probe returning 404 — Next.js has no built-in `/health` route. Created `pages/api/health.js` health endpoint, changed probe path from `/health` to `/api/health`. Bumped frontend image to `v1.0.1`.
+9. CSI addon identity stale after AKS cluster was recreated — new cluster generated new addon identity. Updated all 5 SecretProviderClass files with new Client ID `d755c00c-d37e-47f8-997c-86202a2a77f4`.
+10. All 9 pods reached `1/1 Running` in dev namespace. Step 6.4 complete.
+
+### Step 6.5 — NGINX Ingress Routing
+
+1. Created `k8s/ingress/dev-ingress.yaml` with two path-based routing rules:
+   - `/api/` → `api-gateway:8080` (all API traffic)
+   - `/` → `frontend:3000` (all other traffic — the Next.js app)
+2. Applied: `kubectl apply -f k8s/ingress/dev-ingress.yaml`.
+3. Ingress object received the NGINX controller's external IP `134.33.223.224` as its ADDRESS.
+4. Tested routing via port-forward (bypasses NSG for local verification):
+   - `GET /` → HTTP 200 (Next.js homepage loads)
+   - `GET /api/health` → `{"status":"ok","service":"frontend"}` (Next.js health endpoint)
+   - `GET /api/` → HTTP 308 (api-gateway redirect — routing reached the correct backend)
+5. Noted: external HTTP (port 80) is blocked by the AKS subnet NSG by design (only HTTPS/443 open). Port-forward is the correct verification method for dev.
+6. Committed via GitFlow → PR #29 merged to dev.
+
+### Step 6.6 — Network Policies
+
+1. All 8 NetworkPolicy objects were already deployed as part of the Helm charts in Step 6.4 — each chart includes a `networkpolicy.yaml` template.
+2. Confirmed all 8 policies active: `kubectl get networkpolicy -n dev` showed all 8 services.
+3. Tested **allowed** traffic: curl pod in `dev` namespace → `user-service:3001` → HTTP 200. Traffic within the same namespace is permitted by the egress/ingress rules.
+4. Tested **blocked** traffic: curl pod in `staging` namespace → `user-service.dev.svc.cluster.local:3001` → HTTP 000 (connection timed out). Cross-namespace traffic without explicit allow is blocked.
+5. Network policies confirmed working as a zero-trust pod-level firewall.
+6. No separate PR needed — policies were already in the Helm charts committed in earlier PRs.
+
+### Step 6.7 — Workload Identity
+
+1. Added to `infra/modules/aks/main.tf`:
+   - `oidc_issuer_enabled = true` — exposes an OIDC endpoint so Azure AD can verify K8s ServiceAccount tokens.
+   - `workload_identity_enabled = true` — installs the Workload Identity webhook on the cluster.
+2. Added `oidc_issuer_url` output to `infra/modules/aks/outputs.tf` — needed by the federated credential resource.
+3. Added three new resources to `infra/main.tf`:
+   - `azurerm_user_assigned_identity.notification_service` — the Azure Managed Identity for the service.
+   - `azurerm_federated_identity_credential.notification_service` — links `system:serviceaccount:dev:notification-service` to the Managed Identity via OIDC trust.
+   - `azurerm_role_assignment.notification_service_kv_secrets_user` — grants the Managed Identity `Key Vault Secrets User` on Key Vault scope.
+4. Stale state lock from previous session force-unlocked: `terraform force-unlock -force <lock-id>`.
+5. Ran `terraform apply` — AKS cluster updated in-place (27 seconds, no pod disruption). OIDC and Workload Identity enabled on the control plane only.
+6. Federated Identity Credential already existed in Azure from a prior session — imported into Terraform state with `terraform import` to avoid conflict.
+7. Retrieved Managed Identity Client ID: `2e5e41cb-dd6c-46a5-8420-165c463fe974`.
+8. Updated `helm/charts/notification-service/values.yaml`:
+   - Added `serviceAccount.annotations: {azure.workload.identity/client-id: "2e5e41cb-..."}`.
+   - Added `workloadIdentity.enabled: true`.
+9. Updated `helm/charts/notification-service/templates/deployment.yaml` to add pod label `azure.workload.identity/use: "true"` when `workloadIdentity.enabled` is true.
+10. Ran `helm upgrade notification-service` — new pods rolled out with the label.
+11. Verified Workload Identity webhook injected env vars:
+    - `AZURE_CLIENT_ID=2e5e41cb-dd6c-46a5-8420-165c463fe974`
+    - `AZURE_FEDERATED_TOKEN_FILE=/var/run/secrets/azure/tokens/azure-identity-token`
+    - `AZURE_AUTHORITY_HOST=https://login.microsoftonline.com/`
+12. Committed via GitFlow → PR #30 merged to dev. Local branch deleted.
+
+### Step 6.8 — End-to-End Verification
+
+Full verification run confirming all Phase 6 components working correctly:
+
+| Check | Result | Notes |
+|---|---|---|
+| All 9 pods `1/1 Running` | Pass | 2× notification-service, 1× each other service |
+| All 8 ClusterIP Services | Pass | Correct ports for each service |
+| All 8 HPA objects with live CPU metrics | Pass | CPU 1–10% across services |
+| All 8 NetworkPolicy objects | Pass | Zero-trust ingress/egress enforced |
+| NGINX Ingress Controller (LoadBalancer) | Pass | External IP: 134.33.223.224 |
+| Ingress `GET /` → frontend HTTP 200 | Pass | Next.js homepage |
+| Ingress `GET /api/health` → `{"status":"ok"}` | Pass | Next.js health endpoint |
+| Ingress `GET /api/` → api-gateway HTTP 308 | Pass | Routing reached correct backend |
+| CSI secrets mounted in user-service pod | Pass | `sql-server-fqdn`, `sql-admin-username`, `sql-admin-password` |
+| SQL_SERVER, SQL_USER, SQL_PASSWORD env vars | Pass | Injected from Key Vault via CSI driver |
+| SQL server TCP port 1433 reachable from pod | Pass | `nc -zv` returned open |
+| Workload Identity `AZURE_CLIENT_ID` injected | Pass | webhook operating correctly |
+| Workload Identity `AZURE_FEDERATED_TOKEN_FILE` injected | Pass | Token file projected into pod |
+| External HTTP via public IP (port 80) | Expected block | NSG allows HTTPS only — correct for production design |
+| `db: disconnected` in health checks | Expected — Phase 7 | TCP 1433 is open; app-level DB schema initialization is Phase 7 scope |
+
+Phase 6 complete. All 8 microservices deployed, secured, and observable on AKS.
 
 ---
 
@@ -1347,5 +1576,488 @@ A: ARM64 and AMD64 are different CPU instruction set architectures. A binary com
 **Q: What is Workload Identity and why is it better than mounting service principal credentials?**
 
 A: Workload Identity (Step 6.7 in our project) binds a Kubernetes ServiceAccount to an Azure Managed Identity. A pod that uses the ServiceAccount can obtain short-lived Azure AD tokens without any credentials stored in the pod or in Kubernetes Secrets. Compared to a service principal secret: (1) no secret to rotate — tokens expire automatically, (2) no secret to accidentally log or expose, (3) token scope is limited to what the Managed Identity has been granted, (4) all access is audited in Azure AD logs. It is the Azure-native equivalent of AWS IAM Roles for Service Accounts (IRSA).
+
+---
+
+## 23. Workload Identity — OIDC and Federated Credentials
+
+### The Problem With Credentials in Pods
+
+Before Workload Identity, the common pattern for a pod to authenticate to Azure was:
+
+```
+1. Create a Service Principal in Azure AD
+2. Store its client ID and secret in a Kubernetes Secret
+3. Mount the Secret as env vars into the pod
+4. The pod uses the client ID + secret to get an Azure AD token
+```
+
+Problems:
+- The secret has to be rotated manually (or it expires unexpectedly)
+- It is stored in Kubernetes etcd (not encrypted by default)
+- It could be accidentally logged or printed
+- If the pod is compromised, the attacker has a long-lived credential
+
+### How Workload Identity Solves This
+
+Workload Identity uses a trust relationship between Kubernetes and Azure AD, removing the need for any stored credential.
+
+```
+Kubernetes (AKS)                    Azure AD
+     │                                  │
+     │  "I have an OIDC endpoint at     │
+     │   https://oidc.prod.aks.azure.   │
+     │   com/..."                       │
+     │                                  │
+     │  ← Federated Identity Credential │
+     │    "I trust tokens signed by     │
+     │     this OIDC issuer for subject │
+     │     system:serviceaccount:       │
+     │     dev:notification-service"    │
+```
+
+### The Five Components
+
+**1. OIDC Issuer on AKS**
+```hcl
+oidc_issuer_enabled = true
+```
+AKS exposes an OIDC endpoint that publishes its public signing keys. Azure AD can use this to verify that a token was genuinely issued by this cluster.
+
+**2. Workload Identity Webhook**
+```hcl
+workload_identity_enabled = true
+```
+This installs a mutating webhook in the cluster. Every pod that has the `azure.workload.identity/use: "true"` label is automatically mutated — the webhook injects env vars and a projected volume with a ServiceAccount token.
+
+**3. User Assigned Managed Identity**
+```hcl
+resource "azurerm_user_assigned_identity" "notification_service" {
+  name = "id-notification-service-dev"
+}
+```
+This is the Azure identity that the pod will impersonate. It has role assignments that control what Azure resources it can access.
+
+**4. Federated Identity Credential**
+```hcl
+resource "azurerm_federated_identity_credential" "notification_service" {
+  issuer  = module.aks.oidc_issuer_url
+  subject = "system:serviceaccount:dev:notification-service"
+  audience = ["api://AzureADTokenExchange"]
+}
+```
+This is the trust bridge. It tells Azure AD: "If you receive a token signed by this OIDC issuer (`issuer`) and the token's `sub` claim is `system:serviceaccount:dev:notification-service` (`subject`), then trust it and issue a token for this Managed Identity."
+
+**5. ServiceAccount Annotation + Pod Label**
+```yaml
+# ServiceAccount:
+annotations:
+  azure.workload.identity/client-id: "2e5e41cb-..."
+
+# Pod:
+labels:
+  azure.workload.identity/use: "true"
+```
+
+The annotation tells the webhook which Managed Identity to use. The label tells the webhook to mutate this pod.
+
+### The Full Token Exchange Flow
+
+```
+1. Pod starts with label azure.workload.identity/use: "true"
+        ↓
+2. Webhook intercepts pod creation
+   → Injects AZURE_CLIENT_ID env var
+   → Mounts a projected ServiceAccount token at
+     /var/run/secrets/azure/tokens/azure-identity-token
+   → Token is scoped to "api://AzureADTokenExchange" audience
+        ↓
+3. Application code calls Azure SDK (e.g. KeyVaultClient)
+        ↓
+4. SDK reads AZURE_CLIENT_ID from env
+   SDK reads the projected token from the file
+        ↓
+5. SDK sends request to Azure AD token endpoint:
+   "I have a token signed by AKS OIDC issuer, I want a token for
+    Managed Identity 2e5e41cb-..."
+        ↓
+6. Azure AD validates:
+   → Checks OIDC issuer's public keys (from the OIDC endpoint)
+   → Verifies the token signature
+   → Checks if a Federated Credential exists for this issuer + subject
+   → Issues a short-lived (1 hour) Azure AD access token
+        ↓
+7. Application uses the Azure AD token to call Key Vault / Service Bus / etc.
+   → All calls are audited under the Managed Identity's identity
+```
+
+### What the Webhook Injects
+
+When a pod with `azure.workload.identity/use: "true"` starts, the webhook automatically adds:
+
+```yaml
+env:
+  - name: AZURE_CLIENT_ID
+    value: "2e5e41cb-dd6c-46a5-8420-165c463fe974"
+  - name: AZURE_TENANT_ID
+    value: "4c135936-7e4d-4ea6-9816-7d696b51923d"
+  - name: AZURE_FEDERATED_TOKEN_FILE
+    value: "/var/run/secrets/azure/tokens/azure-identity-token"
+  - name: AZURE_AUTHORITY_HOST
+    value: "https://login.microsoftonline.com/"
+volumeMounts:
+  - name: azure-identity-token
+    mountPath: /var/run/secrets/azure/tokens
+    readOnly: true
+```
+
+The Azure SDK reads these standard env vars automatically — no code changes needed in the application.
+
+---
+
+## 24. Real Implementation Issues Encountered
+
+These are all the real bugs hit during Phase 6 implementation, in the order they occurred. Each one is a genuine production scenario worth understanding.
+
+---
+
+### Issue #1 — ARM64 vs AMD64: `exec format error`
+
+**Error:**
+```
+exec /docker-entrypoint.sh: exec format error
+```
+
+**Root Cause:** Docker images built on Apple Silicon (ARM64 Mac) cannot run on AKS nodes (AMD64 x86 VMs). The CPU architectures are incompatible.
+
+**Fix:**
+```bash
+docker buildx create --name multiarch --driver docker-container --use
+docker buildx build --builder multiarch --platform linux/amd64 \
+  -t acrazureshopdev.azurecr.io/user-service:v1.0.0 --push services/user-service/
+```
+Rebuilt all 8 images with the `--platform linux/amd64` flag.
+
+**Lesson:** Always build production images for `linux/amd64` when developing on Apple Silicon.
+
+---
+
+### Issue #2 — Key Vault Purge Protection: `MethodNotAllowed`
+
+**Error:**
+```
+MethodNotAllowed: The operation is not allowed on a key vault with purge protection enabled
+```
+
+**Root Cause:** We had set `purge_protection_enabled = true` on the Key Vault in Terraform. When the Key Vault was destroyed (by `terraform destroy`), Azure put it in a "soft-deleted" state for 90 days — it cannot be hard-deleted or recreated with the same name during this period.
+
+**Fix:**
+```bash
+az keyvault recover --name kv-azureshop-6a6c-dev
+terraform import -var-file="environments/dev/terraform.tfvars" \
+  module.keyvault.azurerm_key_vault.main \
+  /subscriptions/.../vaults/kv-azureshop-6a6c-dev
+```
+Recovered the soft-deleted vault, then imported it into Terraform state.
+
+**Lesson:** Never enable `purge_protection_enabled = true` unless you are certain the Key Vault name will never need to be reused after destroy. In dev environments, leave it disabled.
+
+---
+
+### Issue #3 — Stale Terraform State Lock
+
+**Error:**
+```
+Error: state blob is already locked
+Lock Info:
+  ID: 64747e86-fdd8-9ebf-77ef-788b03d5349a
+  Operation: OperationTypeApply
+```
+
+**Root Cause:** The previous session's `terraform apply` was interrupted (context expired). The Azure Blob storage lock was never released.
+
+**Fix:**
+```bash
+terraform force-unlock -force 64747e86-fdd8-9ebf-77ef-788b03d5349a
+```
+
+**Lesson:** Terraform state locks are stored in Azure Blob. If an apply is interrupted (process killed, network dropout), the lock stays. `force-unlock` is safe as long as no other apply is actually running.
+
+---
+
+### Issue #4 — Stale Terraform State Drift
+
+**Situation:** After the infrastructure was destroyed and rebuilt, Terraform state listed resources (AKS cluster, VNet, Log Analytics) that no longer existed in Azure.
+
+**Root Cause:** `terraform destroy` was not run before the infrastructure was manually deleted. Terraform's state file still pointed to the old resource IDs.
+
+**Fix:** Running `terraform apply` automatically detected the drift — Terraform planned to create the missing resources and applied the plan. No manual intervention needed.
+
+**Lesson:** Terraform reconciles drift on every `plan`/`apply`. If resources vanish outside of Terraform, the next apply recreates them. Always use `terraform destroy` instead of deleting via the portal to keep state in sync.
+
+---
+
+### Issue #5 — AKS RBAC Access Lost After Cluster Recreation
+
+**Error:**
+```
+Error from server (Forbidden): pods is forbidden: User "..." cannot list resource "pods" in API group "" in the namespace "default"
+```
+
+**Root Cause:** The `Azure Kubernetes Service RBAC Cluster Admin` role assignment was scoped to the old AKS cluster resource ID. When the cluster was destroyed and recreated, it got a new resource ID — the old role assignment was gone.
+
+**Fix:**
+```bash
+az role assignment create \
+  --assignee df0cac37-4e4b-4338-875d-a01366185bd3 \
+  --role "Azure Kubernetes Service RBAC Cluster Admin" \
+  --scope /subscriptions/.../managedClusters/aks-azureshop-dev
+
+az aks get-credentials --resource-group rg-azureshop-dev --name aks-azureshop-dev
+kubelogin convert-kubeconfig -l azurecli
+```
+
+**Lesson:** AKS RBAC role assignments are tied to the cluster resource ID. Any operation that destroys and recreates the cluster (including `terraform destroy` + `terraform apply`) requires re-assigning cluster RBAC roles.
+
+---
+
+### Issue #6 — CSI Addon Identity Stale After Cluster Recreation
+
+**Error:**
+```
+failed to get key vault token: Identity not found
+```
+
+**Root Cause:** Each AKS cluster creation generates a new Key Vault Secrets Provider addon with a new managed identity (new Client ID). The SecretProviderClass files still had the old Client ID from the previous cluster.
+
+**Fix:** Updated all 5 SecretProviderClass files with the new CSI addon Client ID:
+```bash
+az aks show --name aks-azureshop-dev --resource-group rg-azureshop-dev \
+  --query "addonProfiles.azureKeyvaultSecretsProvider.identity.clientId" -o tsv
+# New ID: d755c00c-d37e-47f8-997c-86202a2a77f4
+```
+Updated `userAssignedIdentityID` in all 5 SecretProviderClass YAML files and reapplied.
+
+**Lesson:** When an AKS cluster is recreated, always retrieve the new CSI addon identity Client ID and update all SecretProviderClass resources.
+
+---
+
+### Issue #7 — api-gateway CHOWN Permission Denied
+
+**Error:**
+```
+chown("/var/cache/nginx/client_temp", 101) failed (1: Operation not permitted)
+```
+
+**Root Cause:** The standard `nginx:1.27-alpine` image starts as root to set up cache directories, then drops to UID 101. With `capabilities: drop: ALL` in our security context, the container cannot perform `chown` even as root.
+
+**Fix:** Switched to `nginxinc/nginx-unprivileged:1.27-alpine` — a variant of NGINX that runs entirely as a non-root user (UID 101) from start, never needs `chown`, and is designed for security-hardened environments.
+
+```dockerfile
+# Before:
+FROM nginx:1.27-alpine
+
+# After:
+FROM nginxinc/nginx-unprivileged:1.27-alpine
+```
+
+**Lesson:** Never use the standard `nginx:alpine` image in a security-hardened Kubernetes environment. Always use `nginx-unprivileged` which is purpose-built for containers with dropped capabilities.
+
+---
+
+### Issue #8 — nginx PID File Permission Denied
+
+**Error:**
+```
+open() "/run/nginx.pid" failed (13: Permission denied)
+```
+
+**Root Cause:** The `nginx-unprivileged` image runs as a non-root user. It cannot write to `/run/nginx.pid` which is owned by root. Our `nginx.conf` did not override the default PID path.
+
+**Fix:** Added PID path and temp directory overrides to `nginx.conf`:
+
+```nginx
+pid /tmp/nginx.pid;
+
+http {
+  client_body_temp_path /tmp/client_temp;
+  proxy_temp_path       /tmp/proxy_temp;
+  fastcgi_temp_path     /tmp/fastcgi_temp;
+  uwsgi_temp_path       /tmp/uwsgi_temp;
+  scgi_temp_path        /tmp/scgi_temp;
+  ...
+}
+```
+
+`/tmp` is writable by all users — the non-root NGINX process can write there.
+
+**Lesson:** Any time you switch to a non-root web server image, audit every path the server writes to. PID files, temp directories, and log files all default to root-owned paths.
+
+---
+
+### Issue #9 — Frontend Readiness Probe 404
+
+**Error:**
+```
+Readiness probe failed: HTTP probe failed with statuscode: 404
+```
+
+**Root Cause:** The frontend Helm values had `probes.path: /health`. Next.js does not have a built-in `/health` route — it returns 404 for unknown paths.
+
+**Fix:** Created a Next.js API route at `pages/api/health.js`:
+```javascript
+export default function handler(req, res) {
+  res.status(200).json({ status: "ok", service: "frontend" });
+}
+```
+Updated probe path from `/health` to `/api/health` in the frontend Helm values. Next.js API routes live under `/api/` and respond at that path.
+
+**Lesson:** Each framework has different conventions for health endpoints. Node.js Express apps typically have `/health` built in. Next.js needs an explicit `pages/api/health.js` file. Always verify your health endpoint returns 200 before setting it as a probe path.
+
+---
+
+### Issue #10 — Cached Docker Image After Tag Bump
+
+**Situation:** After fixing the probe path and bumping the image tag from `v1.0.0` to `v1.0.1`, the pod still showed `404` on the probe. The new image was in ACR but Kubernetes was running the old one.
+
+**Root Cause:** The previous deployment used `imagePullPolicy: IfNotPresent`. Once an image with tag `v1.0.0` was pulled to the node, Kubernetes never pulled it again — even after we pushed a new `v1.0.0`. Since we had not bumped the tag in Helm values before upgrading, the node had a cached copy of the old image.
+
+**Fix:** Bumped the image tag to `v1.0.1` in `helm/charts/frontend/values.yaml` and ran `helm upgrade`. With a new tag, `IfNotPresent` correctly detected the image was not present and pulled the new one from ACR.
+
+**Lesson:** `imagePullPolicy: IfNotPresent` (the recommended default) caches images aggressively. Always bump the image tag when you push a new image — never overwrite an existing tag in production. The only exception is `imagePullPolicy: Always`, but this adds latency to every pod start.
+
+---
+
+### Issue #11 — Federated Identity Credential Already Exists on Terraform Apply
+
+**Error:**
+```
+a resource with the ID "...fic-notification-service-dev" already exists - to be managed via Terraform
+this resource needs to be imported into the State.
+```
+
+**Root Cause:** The Federated Identity Credential was created by a `terraform apply` in a previous session that the state file did not record (the apply completed but the session ended before state was fully written, or it was created manually).
+
+**Fix:**
+```bash
+terraform import \
+  -var-file="environments/dev/terraform.tfvars" \
+  azurerm_federated_identity_credential.notification_service \
+  "/subscriptions/.../userAssignedIdentities/id-notification-service-dev/federatedIdentityCredentials/fic-notification-service-dev"
+```
+After import, the next `terraform apply` saw no changes needed for that resource.
+
+**Lesson:** When Terraform says "resource already exists, import it," never delete and recreate — use `terraform import`. Deletion would disrupt any services depending on that resource.
+
+---
+
+## 25. Additional Interview Questions — Steps 6.5 to 6.8
+
+### Ingress and Routing
+
+**Q: What is a Kubernetes Ingress resource and how is it different from a Service of type LoadBalancer?**
+
+A: A **Service of type LoadBalancer** provisions one Azure Load Balancer per service — one public IP per service. With 8 services, you get 8 public IPs and 8 load balancers, which is expensive and hard to manage. A **Kubernetes Ingress** is a routing rule that sits in front of multiple services. The Ingress Controller (in our case NGINX) is the single LoadBalancer that receives all traffic. The Ingress resource defines routing rules — for example, path `/api/` goes to api-gateway, path `/` goes to frontend. All 8 services share one public IP and one Azure Load Balancer, saving cost and centralising traffic management.
+
+---
+
+**Q: What is the NGINX Ingress Controller and what does it actually do?**
+
+A: The NGINX Ingress Controller is a Kubernetes controller that watches for Ingress resources and dynamically configures an NGINX reverse proxy to match those rules. When you create or update an Ingress object, the controller re-renders the NGINX config and reloads it without downtime. In Azure, it runs as a Deployment and creates a Service of type LoadBalancer — Azure provisions a public IP and load balancer for it. All traffic enters through this single IP, and NGINX forwards it to the correct Service based on the path or hostname rules in your Ingress objects.
+
+---
+
+**Q: Why was HTTP (port 80) blocked from the internet to your AKS cluster?**
+
+A: The AKS subnet has an NSG (Network Security Group) with explicit inbound rules. Our NSG allows: HTTPS (port 443) from the internet, load balancer health probes (source `AzureLoadBalancer`), and VNet-internal traffic. HTTP (port 80) is not in the allow list — this is intentional. In a production setup, all external traffic should be HTTPS (encrypted). HTTP would typically be redirected to HTTPS at the ingress layer. For development verification we used `kubectl port-forward` to bypass the NSG and test locally. For end users, the App Gateway (Phase 7) handles TLS termination and forwards HTTPS traffic into the cluster.
+
+---
+
+### Network Policies
+
+**Q: How did you test that your NetworkPolicy was actually working?**
+
+A: We ran two tests:
+
+1. **Allowed path:** Deployed a curl pod in the `dev` namespace and hit `user-service:3001/health`. Got HTTP 200 — same-namespace traffic is allowed by the NetworkPolicy's ingress rule.
+
+2. **Blocked path:** Deployed a curl pod in the `staging` namespace and tried to reach `user-service.dev.svc.cluster.local:3001`. Got HTTP 000 (connection timed out) — cross-namespace traffic from staging is not in user-service's ingress allow list, so Azure CNI's policy engine dropped the packets.
+
+The timeout (not TCP reset) is characteristic of a NetworkPolicy drop — the packets are silently discarded at the virtual switch level, not rejected by the application.
+
+---
+
+**Q: If NetworkPolicy is declared in YAML, what actually enforces it in AKS?**
+
+A: The Kubernetes API stores NetworkPolicy objects, but they have no effect without a network policy engine. In our cluster, we set `network_policy = "azure"` in the AKS Terraform config. This tells AKS to use the Azure NPM (Network Policy Manager), which is a DaemonSet that runs on every node and programs `iptables` rules based on the NetworkPolicy objects. When a packet arrives at a pod, the node's kernel checks these iptables rules before delivering it. Without `network_policy = "azure"` (or `calico`), NetworkPolicy objects are stored but completely ignored.
+
+---
+
+### Terraform State Management
+
+**Q: What is a Terraform state lock and how do you handle a stale one?**
+
+A: When `terraform apply` starts, it writes a lock to the state backend (in our case an Azure Blob Storage blob) to prevent two simultaneous applies from corrupting the state. The lock contains a lock ID, who created it, and when. If the apply process is killed (terminal closed, network dropout, context expired), the lock is never released. The next apply fails with "state blob is already locked."
+
+To resolve it, first verify no apply is actually running, then force-unlock:
+```bash
+terraform force-unlock -force <lock-id>
+```
+The lock ID is shown in the error message. This is safe because we verified the apply is not running — we are not overwriting a live apply.
+
+---
+
+**Q: What does `terraform import` do and when do you need it?**
+
+A: `terraform import` adds an existing Azure resource into Terraform's state file without creating or modifying the resource. You need it when a resource exists in Azure but Terraform does not know about it — either because it was created manually, created by a previous apply whose state was not saved, or created by another tool. Without import, `terraform apply` fails with "resource already exists." With import, Terraform takes ownership of the resource and manages it going forward. The resource's configuration in `.tf` files must match what is in Azure, or the next apply will try to update it to match.
+
+---
+
+### Workload Identity
+
+**Q: Walk me through exactly what happens when a notification-service pod starts and needs to call Key Vault.**
+
+A: When the pod is scheduled:
+
+1. The Workload Identity webhook sees the pod has label `azure.workload.identity/use: "true"`. It mutates the pod spec — injects `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_FEDERATED_TOKEN_FILE`, and mounts a projected ServiceAccount token signed by the AKS OIDC issuer into the pod.
+
+2. When the application code calls the Azure Key Vault SDK, the SDK reads `AZURE_CLIENT_ID` and `AZURE_FEDERATED_TOKEN_FILE` automatically (using `DefaultAzureCredential`).
+
+3. The SDK reads the projected token (a JWT signed by AKS) and sends it to Azure AD with a token exchange request: "I have this K8s token, issue me an Azure AD token for Managed Identity `2e5e41cb-...`."
+
+4. Azure AD validates the K8s token by fetching the AKS OIDC public keys from the issuer URL. It checks the Federated Identity Credential — is there one for this issuer and subject (`system:serviceaccount:dev:notification-service`)? Yes. It issues a short-lived Azure AD access token for the Managed Identity.
+
+5. The SDK uses the Azure AD token to call Key Vault. Key Vault checks RBAC — the Managed Identity has `Key Vault Secrets User`. Access granted.
+
+6. The whole flow took milliseconds, involved no stored credentials, and produces a token that expires in 1 hour.
+
+---
+
+**Q: What is a Federated Identity Credential and what does it actually contain?**
+
+A: A Federated Identity Credential (FIC) is a rule attached to a Managed Identity that defines which external identity providers can impersonate it. It has three fields:
+
+- **issuer** — the OIDC endpoint URL of the trusted token issuer (our AKS cluster's OIDC URL).
+- **subject** — the `sub` claim in the incoming token that must match (`system:serviceaccount:dev:notification-service`).
+- **audience** — the `aud` claim that must be present in the token (`api://AzureADTokenExchange`).
+
+All three must match for Azure AD to accept the token exchange. The `subject` field is what makes it scoped to a specific Kubernetes ServiceAccount in a specific namespace — not any pod in the cluster, only the `notification-service` ServiceAccount in the `dev` namespace.
+
+---
+
+**Q: Why use a User Assigned Managed Identity instead of a System Assigned one for Workload Identity?**
+
+A: A System Assigned Managed Identity is tied to the lifecycle of the resource it is attached to — if the AKS cluster is deleted, the identity is deleted. A User Assigned Managed Identity is an independent Azure resource with its own lifecycle. For Workload Identity, we use User Assigned because:
+
+1. We can create it in Terraform before the AKS cluster exists and reference it.
+2. If the AKS cluster is destroyed and recreated, the identity survives — role assignments and Federated Credentials are preserved.
+3. The same identity can be used by pods across multiple clusters.
+4. The Client ID is stable across cluster recreations — no need to update Helm values when the cluster is rebuilt.
+
+---
+
+**Q: What happens if you forget to add `azure.workload.identity/use: "true"` to the pod but the ServiceAccount annotation is present?**
+
+A: Nothing works. The label on the pod is the trigger for the Workload Identity webhook. Without it, the webhook does not mutate the pod — no env vars are injected, no token file is projected. The application code would call `DefaultAzureCredential`, find no credentials, and fail with an authentication error. The ServiceAccount annotation alone is not enough — both the annotation (which tells the webhook which Managed Identity to use) and the pod label (which tells the webhook to act on this pod) are required.
 
 ---
