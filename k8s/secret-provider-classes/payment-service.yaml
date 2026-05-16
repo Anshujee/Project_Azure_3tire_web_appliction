@@ -8,7 +8,7 @@ spec:
   parameters:
     usePodIdentity: "false"
     useVMManagedIdentity: "true"
-    userAssignedIdentityID: "4e3f0c0a-9fee-4512-94fc-9d7eea9c96f3"
+    userAssignedIdentityID: "d755c00c-d37e-47f8-997c-86202a2a77f4"
     keyvaultName: "kv-azureshop-6a6c-dev"
     tenantId: "4c135936-7e4d-4ea6-9816-7d696b51923d"
     objects: |
