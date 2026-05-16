@@ -39,4 +39,8 @@ hpa:
   cpuUtilizationPercentage: 70
 
 serviceAccount:
-  annotations: {}
+  annotations:
+    azure.workload.identity/client-id: "2e5e41cb-dd6c-46a5-8420-165c463fe974"
+
+workloadIdentity:
+  enabled: true

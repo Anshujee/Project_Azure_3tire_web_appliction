@@ -33,3 +33,8 @@ output "addon_identity_object_id" {
   description = "Object ID of the Key Vault Secrets Provider addon managed identity — used to grant Key Vault Secrets User role so CSI driver can read secrets"
   value       = azurerm_kubernetes_cluster.main.key_vault_secrets_provider[0].secret_identity[0].object_id
 }
+
+output "oidc_issuer_url" {
+  description = "OIDC issuer URL — used to create Federated Identity Credentials linking K8s ServiceAccounts to Azure Managed Identities"
+  value       = azurerm_kubernetes_cluster.main.oidc_issuer_url
+}

@@ -78,6 +78,17 @@ resource "azurerm_kubernetes_cluster" "main" {
     }
   }
 
+  # ── OIDC Issuer ───────────────────────────
+  # Required for Workload Identity — exposes an OIDC endpoint so Azure AD
+  # can verify tokens issued by Kubernetes ServiceAccounts
+  oidc_issuer_enabled = true
+
+  # ── Workload Identity ─────────────────────
+  # Installs the Workload Identity webhook on the cluster
+  # Allows pods to authenticate to Azure AD using their ServiceAccount token
+  # without any credentials stored in the pod or Kubernetes Secrets
+  workload_identity_enabled = true
+
   # ── Azure Policy Addon ────────────────────
   # Enforces policies on workloads running in AKS
   # e.g. deny privileged containers, require resource limits
