@@ -76,3 +76,54 @@ variable "log_analytics_workspace_id" {
   type        = string
   default     = null
 }
+
+# ── Spot Node Pool ────────────────────────────────────────────────
+variable "enable_spot_node_pool" {
+  description = "Set to true to add a spot node pool — cheap burst capacity with eviction risk"
+  type        = bool
+  default     = false
+}
+
+variable "spot_node_vm_size" {
+  description = "VM size for the spot node pool"
+  type        = string
+  default     = "Standard_D2s_v3"
+}
+
+variable "spot_node_max_count" {
+  description = "Maximum nodes the spot autoscaler can scale up to"
+  type        = number
+  default     = 5
+}
+
+# ── Flux GitOps ───────────────────────────────────────────────────
+variable "enable_flux" {
+  description = "Install the Flux v2 GitOps operator on the AKS cluster"
+  type        = bool
+  default     = false
+}
+
+variable "git_repository_url" {
+  description = "Git repository URL for Flux to watch — Azure DevOps HTTPS format"
+  type        = string
+  default     = "https://dev.azure.com/azureshop-org/AzureShop/_git/AzureShop"
+}
+
+variable "git_branch" {
+  description = "Branch Flux will track for GitOps reconciliation"
+  type        = string
+  default     = "dev"
+}
+
+variable "git_https_user" {
+  description = "Azure DevOps username for Flux git authentication (any non-empty string works with PAT auth)"
+  type        = string
+  default     = "flux"
+}
+
+variable "git_https_pat" {
+  description = "Azure DevOps Personal Access Token for Flux git authentication — set via TF_VAR_git_https_pat"
+  type        = string
+  sensitive   = true
+  default     = ""
+}

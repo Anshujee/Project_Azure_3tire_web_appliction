@@ -1,0 +1,71 @@
+# Canary Deployment Pattern with NGINX Ingress
+# ─────────────────────────────────────────────────────────────────────────────
+# HOW IT WORKS:
+#   Two Ingress objects share the same path (/api/users).
+#   NGINX routes traffic between them based on the canary-weight annotation.
+#   This example sends 20% of requests to the canary (new version) and
+#   80% to the stable (current production) version.
+#
+# PREREQUISITES:
+#   1. A stable Deployment+Service running user-service (already deployed)
+#   2. A canary Deployment+Service named user-service-canary (new version)
+#   3. The NGINX Ingress Controller installed (already running from Phase 6)
+#
+# TO PROMOTE CANARY → STABLE:
+#   Bump the stable image tag and increase canary-weight to 100, then remove
+#   the canary Ingress and Deployment once traffic is fully migrated.
+#
+# TO ROLLBACK:
+#   Delete this canary Ingress — all traffic falls back to stable immediately.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Stable ingress — routes the baseline (80%) traffic to the current production service.
+# This is the same path that dev-ingress.yaml already manages.
+# Keep this as a reference; in production the main ingress handles stable traffic.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: user-service-stable
+  namespace: dev
+  annotations:
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /api/users
+            pathType: Prefix
+            backend:
+              service:
+                name: user-service
+                port:
+                  number: 3001
+---
+# Canary ingress — intercepts the canary-weight percentage of requests.
+# nginx.ingress.kubernetes.io/canary: "true"  marks this as a canary ingress
+# nginx.ingress.kubernetes.io/canary-weight  sets the percentage (0–100)
+#
+# Other canary strategies (use one at a time, not combined with weight):
+#   canary-by-header: "X-Canary"         → routes requests with this header to canary
+#   canary-by-header-value: "true"       → header must match this value
+#   canary-by-cookie: "canary_user"      → routes requests with this cookie to canary
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: user-service-canary
+  namespace: dev
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: "20"
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /api/users
+            pathType: Prefix
+            backend:
+              service:
+                name: user-service-canary
+                port:
+                  number: 3001
