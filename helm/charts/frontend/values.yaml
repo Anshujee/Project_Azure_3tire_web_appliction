@@ -1,6 +1,6 @@
 image:
   repository: acrazureshopdev.azurecr.io/frontend
-  tag: "v1.0.0"
+  tag: "v1.0.1"
   pullPolicy: IfNotPresent
 
 replicaCount: 2
@@ -26,7 +26,7 @@ secretProviderClass:
   secretName: ""
 
 probes:
-  path: /health
+  path: /api/health
 
 resources:
   requests:
