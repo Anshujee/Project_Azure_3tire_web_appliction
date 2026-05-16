@@ -61,20 +61,50 @@ steps:
       echo "Built image: $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}"
     displayName: 'Docker Build — ${{ parameters.serviceName }}'
 
-  # ── Step 4: Trivy vulnerability scan ───────────────────────────
-  # --exit-code 1 means pipeline FAILS if HIGH or CRITICAL CVEs are found
-  # Image is never pushed to ACR if this step fails
-  # This is shift-left security — catch problems before they reach production
+  # ── Step 4a: Trivy — SARIF report (non-blocking) ───────────────
+  # Generates a SARIF file that appears in the Azure DevOps Security tab.
+  # --exit-code 0 so this step never fails the pipeline — it is for visibility.
+  # The blocking scan in Step 4b enforces the gate.
   - script: |
-      echo "Scanning for HIGH and CRITICAL vulnerabilities..."
+      mkdir -p $(Build.ArtifactStagingDirectory)/trivy
+      docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v $(Build.ArtifactStagingDirectory)/trivy:/output \
+        aquasec/trivy:latest image \
+          --exit-code 0 \
+          --severity HIGH,CRITICAL \
+          --ignore-unfixed \
+          --format sarif \
+          --output /output/trivy-${{ parameters.serviceName }}.sarif \
+          --no-progress \
+          $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}
+      echo "SARIF report written to trivy-${{ parameters.serviceName }}.sarif"
+    displayName: 'Trivy SARIF Report — ${{ parameters.serviceName }}'
+
+  # ── Step 4b: Trivy — blocking gate ─────────────────────────────
+  # --exit-code 1 fails the pipeline if any unfixed HIGH/CRITICAL CVE is found.
+  # --ignore-unfixed skips CVEs with no available fix — no action possible.
+  # Image is never pushed to ACR if this step fails.
+  - script: |
+      echo "Security gate: blocking on unfixed HIGH/CRITICAL CVEs..."
       docker run --rm \
         -v /var/run/docker.sock:/var/run/docker.sock \
         aquasec/trivy:latest image \
           --exit-code 1 \
           --severity HIGH,CRITICAL \
+          --ignore-unfixed \
           --no-progress \
           $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}
-    displayName: 'Trivy Security Scan — ${{ parameters.serviceName }}'
+    displayName: 'Trivy Security Gate — ${{ parameters.serviceName }}'
+
+  # ── Step 4c: Publish SARIF as pipeline artifact ─────────────────
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Trivy SARIF — ${{ parameters.serviceName }}'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/trivy'
+      ArtifactName: 'trivy-reports'
+      publishLocation: 'Container'
+    condition: always()   # publish even if Step 4b fails
 
   # ── Step 5: Push to ACR ─────────────────────────────────────────
   # Only reaches here if ALL previous steps passed (tests + trivy scan)

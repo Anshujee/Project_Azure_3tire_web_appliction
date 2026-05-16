@@ -21,9 +21,7 @@ spec:
     spec:
       serviceAccountName: {{ include "azureshop.name" . }}
       securityContext:
-        seccompProfile:
-          type: RuntimeDefault
-        # runAsNonRoot and runAsUser hardened in Phase 8 once UIDs are confirmed per image
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
       # Spread pods across nodes — prevents all replicas landing on one node
       topologySpreadConstraints:
         - maxSkew: 1
@@ -40,10 +38,7 @@ spec:
             - containerPort: {{ .Values.service.targetPort }}
               protocol: TCP
           securityContext:
-            allowPrivilegeEscalation: false
-            capabilities:
-              drop:
-                - ALL
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           # Non-sensitive config from values.yaml
@@ -73,7 +68,7 @@ spec:
             initialDelaySeconds: 30
             periodSeconds: 10
             failureThreshold: 3
-          # Readiness probe — removes pod from Service endpoints until it's ready
+          # Readiness probe — removes pod from Service endpoints until it is ready
           readinessProbe:
             httpGet:
               path: {{ .Values.probes.path }}
@@ -81,20 +76,24 @@ spec:
             initialDelaySeconds: 10
             periodSeconds: 5
             failureThreshold: 3
-          {{- if .Values.secretProviderClass.enabled }}
           volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.secretProviderClass.enabled }}
             - name: secrets-store
               mountPath: /mnt/secrets-store
               readOnly: true
-          {{- end }}
-      {{- if .Values.secretProviderClass.enabled }}
-      # CSI volume — the driver mounts this, reads from Key Vault, and
-      # creates a Kubernetes Secret (referenced in envFrom above)
+            {{- end }}
       volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.secretProviderClass.enabled }}
+        # CSI volume — the driver mounts this, reads from Key Vault, and
+        # creates a Kubernetes Secret (referenced in envFrom above)
         - name: secrets-store
           csi:
             driver: secrets-store.csi.k8s.io
             readOnly: true
             volumeAttributes:
               secretProviderClass: {{ .Values.secretProviderClass.name }}
-      {{- end }}
+        {{- end }}

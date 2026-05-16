@@ -1,0 +1,14 @@
+# .trivyignore — Acknowledged CVE exceptions for AzureShop
+#
+# Format: one CVE ID per line, optional trailing comment
+# Trivy reads this file automatically when run from the repo root.
+# For pipeline scans, mount this file into the container or pass --ignorefile.
+#
+# IMPORTANT: Every entry here must have a justification comment.
+# Review and prune this list every quarter — "ignore" is not "won't fix forever".
+#
+# Template for new entries:
+#   CVE-YYYY-XXXXX  # Package: x.y.z | Risk: accepted because... | Review by: YYYY-MM-DD
+
+# Example entry (remove when real CVEs are added):
+# CVE-2023-12345  # Package: some-lib 1.0.0 | No fix available | Risk: low in our config | Review: 2026-08-01

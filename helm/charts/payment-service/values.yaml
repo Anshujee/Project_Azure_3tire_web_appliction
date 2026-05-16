@@ -44,5 +44,19 @@ hpa:
   maxReplicas: 10
   cpuUtilizationPercentage: 70
 
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
 serviceAccount:
   annotations: {}
