@@ -1,5 +1,5 @@
 # NGINX has no build step — just copy the config into the official image
-FROM nginx:1.27-alpine
+FROM nginxinc/nginx-unprivileged:1.27-alpine
 
 # Remove default NGINX config
 RUN rm /etc/nginx/conf.d/default.conf
