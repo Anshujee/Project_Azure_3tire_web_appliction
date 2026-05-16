@@ -1,0 +1,246 @@
+# PrometheusRule — AzureShop alert definitions
+#
+# The Prometheus Operator (part of kube-prometheus-stack) watches for
+# PrometheusRule resources and loads them into Prometheus automatically.
+#
+# The label "release: kube-prometheus-stack" must match the ruleSelector
+# configured in the Prometheus CR — this is the default when installed
+# with Helm release name "kube-prometheus-stack".
+#
+# Apply: kubectl apply -f k8s/alert-rules/azureshop-alerts.yaml
+# Verify: kubectl get prometheusrule -n monitoring
+#         kubectl port-forward svc/kube-prometheus-stack-prometheus 9090:9090 -n monitoring
+#         # Open Alerts tab at http://localhost:9090/alerts
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: azureshop-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack   # required — operator uses this to select rules
+    app: azureshop
+spec:
+  groups:
+
+    # ── HTTP-level alerts ──────────────────────────────────────────────────
+    # Based on http_requests_total and http_request_duration_seconds
+    # emitted by the telemetry.js / telemetry.py modules in each service.
+    - name: azureshop.http
+      interval: 1m
+      rules:
+
+        # Fires when a service returns 5xx on more than 5% of requests
+        # for 5 consecutive minutes.
+        # WHY 5%: normal transient errors stay under 1%; 5% means something
+        # is structurally wrong (bad deploy, downstream failure, OOM).
+        - alert: HighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{namespace="dev", status_code=~"5.."}[5m])) by (service)
+              /
+              sum(rate(http_requests_total{namespace="dev"}[5m])) by (service)
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+            team: azureshop
+          annotations:
+            summary: "High 5xx error rate on {{ $labels.service }}"
+            description: >
+              {{ $labels.service }} is returning 5xx on
+              {{ $value | humanizePercentage }} of requests (threshold: 5%).
+              Check pod logs: kubectl logs -l app={{ $labels.service }} -n dev --tail=50
+
+        # Fires when P95 response time exceeds 1 second for 5 minutes.
+        # WHY 1s: our SLO target; above 1s users notice slowness.
+        - alert: HighP95Latency
+          expr: |
+            histogram_quantile(
+              0.95,
+              sum(rate(http_request_duration_seconds_bucket{namespace="dev"}[5m])) by (service, le)
+            ) > 1
+          for: 5m
+          labels:
+            severity: warning
+            team: azureshop
+          annotations:
+            summary: "High P95 latency on {{ $labels.service }}"
+            description: >
+              {{ $labels.service }} P95 latency is {{ $value | humanizeDuration }}
+              (threshold: 1s). Possible causes: slow database query, downstream
+              dependency, or CPU throttling.
+
+        # Fires when a service stops receiving requests entirely for 10 minutes.
+        # absent() returns 1 when a metric series disappears — means the pods
+        # are down or the service stopped exposing /metrics.
+        - alert: ServiceReceivingNoTraffic
+          expr: |
+            absent(rate(http_requests_total{namespace="dev"}[5m]))
+          for: 10m
+          labels:
+            severity: warning
+            team: azureshop
+          annotations:
+            summary: "No traffic observed in dev namespace"
+            description: >
+              No http_requests_total metrics from the dev namespace for 10 minutes.
+              Either all services are down or Prometheus cannot scrape them.
+
+    # ── Pod availability alerts ────────────────────────────────────────────
+    # Based on kube-state-metrics — tracks Kubernetes object state.
+    - name: azureshop.availability
+      interval: 1m
+      rules:
+
+        # Fires when any pod is stuck in CrashLoopBackOff.
+        # CrashLoopBackOff means the container exits immediately and Kubernetes
+        # keeps retrying — usually a missing env var, bad config, or OOM kill.
+        - alert: PodCrashLoopBackOff
+          expr: |
+            kube_pod_container_status_waiting_reason{
+              namespace="dev",
+              reason="CrashLoopBackOff"
+            } == 1
+          for: 5m
+          labels:
+            severity: critical
+            team: azureshop
+          annotations:
+            summary: "Pod {{ $labels.pod }} is in CrashLoopBackOff"
+            description: >
+              Container {{ $labels.container }} in pod {{ $labels.pod }}
+              (namespace: dev) has been crash-looping for 5 minutes.
+              Check logs: kubectl logs {{ $labels.pod }} -n dev --previous
+
+        # Fires when a pod has been in a non-Running phase for 15 minutes.
+        # Covers Pending (can't schedule), Failed, and Unknown states.
+        - alert: PodNotRunning
+          expr: |
+            kube_pod_status_phase{
+              namespace="dev",
+              phase!="Running",
+              phase!="Succeeded"
+            } == 1
+          for: 15m
+          labels:
+            severity: warning
+            team: azureshop
+          annotations:
+            summary: "Pod {{ $labels.pod }} stuck in {{ $labels.phase }}"
+            description: >
+              Pod {{ $labels.pod }} (namespace: dev) has been in phase
+              {{ $labels.phase }} for 15 minutes.
+              Describe: kubectl describe pod {{ $labels.pod }} -n dev
+
+        # Fires when a deployment has zero available replicas — service is down.
+        - alert: DeploymentUnavailable
+          expr: |
+            kube_deployment_status_replicas_available{namespace="dev"} == 0
+          for: 2m
+          labels:
+            severity: critical
+            team: azureshop
+          annotations:
+            summary: "Deployment {{ $labels.deployment }} has no available replicas"
+            description: >
+              {{ $labels.deployment }} in dev namespace has 0 available replicas
+              for 2 minutes — the service is completely down.
+              Check: kubectl rollout status deployment/{{ $labels.deployment }} -n dev
+
+        # Fires when a pod has been unschedulable for 10 minutes.
+        # Means no node has enough CPU/memory, or taints/affinity rules block it.
+        - alert: PodUnschedulable
+          expr: |
+            kube_pod_status_unschedulable{namespace="dev"} == 1
+          for: 10m
+          labels:
+            severity: warning
+            team: azureshop
+          annotations:
+            summary: "Pod {{ $labels.pod }} cannot be scheduled"
+            description: >
+              Pod {{ $labels.pod }} has been unschedulable for 10 minutes.
+              Likely cause: insufficient node resources or affinity mismatch.
+              Check: kubectl describe pod {{ $labels.pod }} -n dev
+
+    # ── Capacity alerts ────────────────────────────────────────────────────
+    # Based on HPA and container resource metrics.
+    - name: azureshop.capacity
+      interval: 1m
+      rules:
+
+        # Fires when an HPA has been at its maximum replica count for 10 minutes.
+        # This means the autoscaler wants to scale but is blocked by maxReplicas.
+        # Time to either raise the limit or investigate the load spike.
+        - alert: HPAAtMaxReplicas
+          expr: |
+            kube_horizontalpodautoscaler_status_current_replicas{namespace="dev"}
+            ==
+            kube_horizontalpodautoscaler_spec_max_replicas{namespace="dev"}
+          for: 10m
+          labels:
+            severity: warning
+            team: azureshop
+          annotations:
+            summary: "HPA {{ $labels.horizontalpodautoscaler }} is at max replicas"
+            description: >
+              {{ $labels.horizontalpodautoscaler }} has been at its maximum replica
+              count ({{ $value }}) for 10 minutes and cannot scale further.
+              Consider raising maxReplicas in the Helm values or investigating the load.
+
+        # Fires when container memory working set exceeds 85% of its limit.
+        # At 100% the container is OOM-killed — this gives time to act first.
+        - alert: HighMemoryUsage
+          expr: |
+            (
+              container_memory_working_set_bytes{
+                namespace="dev",
+                container!="",
+                container!="POD"
+              }
+              /
+              container_spec_memory_limit_bytes{
+                namespace="dev",
+                container!="",
+                container!="POD"
+              }
+            ) > 0.85
+          for: 5m
+          labels:
+            severity: warning
+            team: azureshop
+          annotations:
+            summary: "High memory usage in container {{ $labels.container }}"
+            description: >
+              Container {{ $labels.container }} in pod {{ $labels.pod }}
+              is using {{ $value | humanizePercentage }} of its memory limit.
+              If it hits 100% the container will be OOM-killed.
+              Consider raising the memory limit in Helm values.
+
+        # Fires when CPU throttling is high — container is hitting its CPU limit.
+        # Throttled CPU means slower responses without OOM kill.
+        - alert: HighCPUThrottling
+          expr: |
+            (
+              sum(rate(container_cpu_cfs_throttled_seconds_total{
+                namespace="dev",
+                container!="",
+                container!="POD"
+              }[5m])) by (container, pod)
+              /
+              sum(rate(container_cpu_cfs_periods_total{
+                namespace="dev",
+                container!="",
+                container!="POD"
+              }[5m])) by (container, pod)
+            ) > 0.25
+          for: 10m
+          labels:
+            severity: warning
+            team: azureshop
+          annotations:
+            summary: "CPU throttling on container {{ $labels.container }}"
+            description: >
+              Container {{ $labels.container }} in pod {{ $labels.pod }} is
+              CPU-throttled {{ $value | humanizePercentage }} of the time.
+              This causes latency spikes. Consider raising the CPU limit.
