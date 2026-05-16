@@ -22,6 +22,9 @@ spec:
         - |
           objectName: sql-admin-password
           objectType: secret
+        - |
+          objectName: appinsights-user-service-cs
+          objectType: secret
   # secretObjects creates a Kubernetes Secret from the Key Vault values
   # Pods can then reference this Secret as env vars without touching Key Vault directly
   secretObjects:
@@ -34,3 +37,5 @@ spec:
           key: SQL_USER
         - objectName: sql-admin-password
           key: SQL_PASSWORD
+        - objectName: appinsights-user-service-cs
+          key: APPINSIGHTS_CONNECTION_STRING

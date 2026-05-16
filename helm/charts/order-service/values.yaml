@@ -23,6 +23,12 @@ env:
     value: "http://notification-service:3006"
 
 # Key Vault CSI — injects SQL credentials as env vars
+  - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+    valueFrom:
+      secretKeyRef:
+        name: order-service-secrets
+        key: APPINSIGHTS_CONNECTION_STRING
+        optional: true
 secretProviderClass:
   enabled: true
   name: order-service-secrets
