@@ -132,3 +132,49 @@ resource "azurerm_role_assignment" "csi_addon_kv_secrets_user" {
   role_definition_name = "Key Vault Secrets User"
   scope                = module.keyvault.key_vault_id
 }
+
+# ── Workload Identity — notification-service ──────────────────────────────────
+# Workload Identity allows pods to authenticate to Azure AD using their
+# Kubernetes ServiceAccount token — no credentials stored anywhere.
+#
+# How it works:
+# 1. Pod's ServiceAccount has annotation: azure.workload.identity/client-id
+# 2. Pod has label: azure.workload.identity/use: "true"
+# 3. Workload Identity webhook injects AZURE_CLIENT_ID env var + token mount
+# 4. Azure SDK uses the projected token to get a short-lived Azure AD token
+# 5. Token is scoped to what the Managed Identity has been granted
+
+# User Assigned Managed Identity for notification-service
+# Using User Assigned (not System Assigned) so it can be referenced before AKS exists
+resource "azurerm_user_assigned_identity" "notification_service" {
+  name                = "id-notification-service-${var.environment}"
+  location            = var.location
+  resource_group_name = var.resource_group_name
+  tags                = local.tags
+}
+
+# Federated Identity Credential — links the K8s ServiceAccount to the Managed Identity
+# AKS OIDC issuer signs the ServiceAccount token; Azure AD trusts this issuer
+# and exchanges the token for an Azure AD access token
+resource "azurerm_federated_identity_credential" "notification_service" {
+  name                = "fic-notification-service-${var.environment}"
+  resource_group_name = var.resource_group_name
+  parent_id           = azurerm_user_assigned_identity.notification_service.id
+
+  # The OIDC issuer of our AKS cluster — Azure AD will trust tokens from this issuer
+  issuer = module.aks.oidc_issuer_url
+
+  # The subject is the ServiceAccount: system:serviceaccount:<namespace>:<serviceaccount-name>
+  subject = "system:serviceaccount:${var.environment}:notification-service"
+
+  # Azure AD audience — must match what the projected token uses (always this value for AKS)
+  audience = ["api://AzureADTokenExchange"]
+}
+
+# Grant notification-service read access to Key Vault secrets
+# With Workload Identity the pod can call Key Vault SDK directly at runtime
+resource "azurerm_role_assignment" "notification_service_kv_secrets_user" {
+  principal_id         = azurerm_user_assigned_identity.notification_service.principal_id
+  role_definition_name = "Key Vault Secrets User"
+  scope                = module.keyvault.key_vault_id
+}
