@@ -79,6 +79,13 @@ variable "redis_primary_access_key" {
   sensitive   = true
 }
 
+variable "application_insights_connection_strings" {
+  description = "Map of service name to Application Insights connection string — one Key Vault secret created per entry"
+  type        = map(string)
+  sensitive   = true
+  default     = {}
+}
+
 variable "network_default_action" {
   description = "Key Vault firewall default action: Allow (dev) or Deny (prod). RBAC still gates all access."
   type        = string
