@@ -17,6 +17,13 @@ env:
   - name: COSMOS_CONTAINER
     value: "products"
 
+  - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+    valueFrom:
+      secretKeyRef:
+        name: product-service-secrets
+        key: APPINSIGHTS_CONNECTION_STRING
+        optional: true
+
 # Key Vault CSI — injects Cosmos DB credentials as env vars
 secretProviderClass:
   enabled: true

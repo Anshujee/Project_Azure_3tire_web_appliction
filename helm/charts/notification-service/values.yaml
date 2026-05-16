@@ -17,6 +17,12 @@ env:
 
 # Service Bus connection string not yet in Key Vault
 # Will be added when Service Bus secrets are stored (post Phase 6)
+  - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+    valueFrom:
+      secretKeyRef:
+        name: notification-service-secrets
+        key: APPINSIGHTS_CONNECTION_STRING
+        optional: true
 secretProviderClass:
   enabled: false
   name: ""

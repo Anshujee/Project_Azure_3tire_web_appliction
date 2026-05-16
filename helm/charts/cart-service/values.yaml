@@ -16,6 +16,12 @@ env:
     value: "production"
 
 # Key Vault CSI — injects Redis credentials as env vars
+  - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+    valueFrom:
+      secretKeyRef:
+        name: cart-service-secrets
+        key: APPINSIGHTS_CONNECTION_STRING
+        optional: true
 secretProviderClass:
   enabled: true
   name: cart-service-secrets

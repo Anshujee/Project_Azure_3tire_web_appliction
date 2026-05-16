@@ -22,6 +22,9 @@ spec:
         - |
           objectName: sql-admin-password
           objectType: secret
+        - |
+          objectName: appinsights-order-service-cs
+          objectType: secret
   secretObjects:
     - secretName: order-service-secrets
       type: Opaque
@@ -32,3 +35,5 @@ spec:
           key: SQL_USER
         - objectName: sql-admin-password
           key: SQL_PASSWORD
+        - objectName: appinsights-order-service-cs
+          key: APPINSIGHTS_CONNECTION_STRING

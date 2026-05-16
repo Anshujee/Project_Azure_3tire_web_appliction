@@ -19,6 +19,9 @@ spec:
         - |
           objectName: cosmos-primary-key
           objectType: secret
+        - |
+          objectName: appinsights-product-service-cs
+          objectType: secret
   secretObjects:
     - secretName: product-service-secrets
       type: Opaque
@@ -27,3 +30,5 @@ spec:
           key: COSMOS_ENDPOINT
         - objectName: cosmos-primary-key
           key: COSMOS_KEY
+        - objectName: appinsights-product-service-cs
+          key: APPINSIGHTS_CONNECTION_STRING

@@ -12,6 +12,10 @@ spec:
       {{- include "azureshop.selectorLabels" . | nindent 6 }}
   template:
     metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.service.targetPort | toString }}"
+        prometheus.io/path: "/metrics"
       labels:
         {{- include "azureshop.labels" . | nindent 8 }}
         {{- if .Values.workloadIdentity.enabled }}

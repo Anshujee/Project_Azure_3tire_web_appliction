@@ -22,6 +22,9 @@ spec:
         - |
           objectName: redis-primary-access-key
           objectType: secret
+        - |
+          objectName: appinsights-cart-service-cs
+          objectType: secret
   secretObjects:
     - secretName: cart-service-secrets
       type: Opaque
@@ -32,3 +35,5 @@ spec:
           key: REDIS_PORT
         - objectName: redis-primary-access-key
           key: REDIS_PASSWORD
+        - objectName: appinsights-cart-service-cs
+          key: APPINSIGHTS_CONNECTION_STRING

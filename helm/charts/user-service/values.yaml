@@ -19,6 +19,12 @@ env:
     value: "db-users"
 
 # Key Vault CSI — injects SQL credentials as env vars
+  - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+    valueFrom:
+      secretKeyRef:
+        name: user-service-secrets
+        key: APPINSIGHTS_CONNECTION_STRING
+        optional: true
 secretProviderClass:
   enabled: true
   name: user-service-secrets      # SecretProviderClass resource name

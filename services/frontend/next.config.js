@@ -1,6 +1,9 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  output: 'standalone',  // bundles only what's needed — produces a smaller Docker image
+  output: 'standalone',
+  experimental: {
+    instrumentationHook: true,  // enables src/instrumentation.js for App Insights startup
+  },
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080',
   },
