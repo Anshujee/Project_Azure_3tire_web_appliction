@@ -38,3 +38,8 @@ output "oidc_issuer_url" {
   description = "OIDC issuer URL — used to create Federated Identity Credentials linking K8s ServiceAccounts to Azure Managed Identities"
   value       = azurerm_kubernetes_cluster.main.oidc_issuer_url
 }
+
+output "flux_enabled" {
+  description = "Whether the Flux GitOps extension was installed on this cluster"
+  value       = var.enable_flux
+}
