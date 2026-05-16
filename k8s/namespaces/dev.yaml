@@ -6,3 +6,13 @@ metadata:
     project: azureshop
     environment: dev
     managed-by: kubectl
+    # Pod Security Admission — enforce the restricted standard on this namespace.
+    # Kubernetes rejects any pod that violates the policy at admission time.
+    # All 8 AzureShop services satisfy restricted: runAsNonRoot, drop ALL caps,
+    # no privilege escalation, RuntimeDefault seccomp.
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: latest
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: latest
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: latest

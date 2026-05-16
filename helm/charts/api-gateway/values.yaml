@@ -33,5 +33,20 @@ hpa:
   maxReplicas: 10
   cpuUtilizationPercentage: 70
 
+# nginx-unprivileged runs as UID 101 (the nginx user in that image)
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 101
+  runAsGroup: 101
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
 serviceAccount:
   annotations: {}
