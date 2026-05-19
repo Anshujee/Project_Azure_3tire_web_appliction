@@ -1,7 +1,7 @@
 # Phase 5 — Azure Pipelines CI/CD: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs vs deployment jobs, reusable templates, Variable Groups, secret variables, Service Connections, image promotion, environment approval gates, path-based triggers, trigger vs pr, terraform plan-then-apply.
+Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs vs deployment jobs, reusable templates, Variable Groups, secret variables, Service Connections, image promotion, environment approval gates, path-based triggers, trigger vs pr, terraform plan-then-apply, Continuous Delivery vs Continuous Deployment deep dive, agent types, YAML variables/conditions/parameters.
 
 ---
 
@@ -17,6 +17,9 @@ Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs v
 8. [What is a Service Connection in Azure Pipelines?](#q8-what-is-a-service-connection-in-azure-pipelines)
 9. [How Does a CD Pipeline Know Which Image Version to Deploy?](#q9-how-does-a-cd-pipeline-know-which-image-version-to-deploy)
 10. [What is an Environment Approval Gate and How Does It Work?](#q10-what-is-an-environment-approval-gate-and-how-does-it-work)
+11. [What is the Difference Between Continuous Delivery and Continuous Deployment?](#q11-what-is-the-difference-between-continuous-delivery-and-continuous-deployment)
+12. [What is an Agent in Azure Pipelines and What Are the Different Types?](#q12-what-is-an-agent-in-azure-pipelines-and-what-are-the-different-types)
+13. [What Are Variables, Conditions, and Parameters in Azure Pipelines YAML?](#q13-what-are-variables-conditions-and-parameters-in-azure-pipelines-yaml)
 
 ---
 
@@ -484,3 +487,417 @@ This is important: the YAML file just says `environment: prod`. The gate itself 
 - `prod` environment — manual approval gate, pipeline pauses indefinitely until an approver acts
 
 This is **Continuous Delivery** (not Continuous Deployment): everything up to staging is fully automated; production always requires human sign-off.
+
+---
+
+## Q11. What is the Difference Between Continuous Delivery and Continuous Deployment?
+
+### The One-Line Difference
+
+| | Meaning |
+|---|---|
+| **Continuous Delivery** | Code is always **ready** to deploy to production — but a human presses the button |
+| **Continuous Deployment** | Code is automatically **deployed** to production — no human involved at all |
+
+### The Analogy
+
+Think of a pizza factory:
+
+- **Continuous Delivery** — The pizza is fully made, boxed, and quality checked. It is sitting at the counter ready to go. But a manager must approve before the delivery driver leaves.
+- **Continuous Deployment** — The pizza is made, boxed, and quality checked. The delivery driver leaves automatically the moment it passes the quality check. No manager approval needed.
+
+The pipeline and quality checks are identical in both cases. The only difference is whether a human approves the final step or not.
+
+### Visual Flow
+
+```
+Code Commit → Build → Unit Tests → Integration Tests → Deploy to Staging → ???
+```
+
+**Continuous Delivery:**
+```
+... → Deploy to Staging → ✅ MANUAL APPROVAL GATE → Deploy to Production
+                               👆 Human clicks Approve
+```
+
+**Continuous Deployment:**
+```
+... → Deploy to Staging → ✅ All tests pass → Deploy to Production (automatic)
+                                               👆 No human involved
+```
+
+### When to Use Which
+
+**Use Continuous Delivery when:**
+- You are in a regulated industry (banking, healthcare) where a human must sign off before release
+- Your product has a marketing/sales release schedule — code is ready but you release on a chosen date
+- Your team is not fully confident in automated test coverage yet
+
+**Use Continuous Deployment when:**
+- You ship dozens of small changes per day (like Netflix, Amazon)
+- Your automated test coverage is very high and fully trusted
+- Speed matters more than manual control
+
+### In AzureShop
+
+Your Azure Pipelines setup uses **Continuous Delivery** for production:
+
+```yaml
+# deploy-prod.yaml
+stages:
+  - stage: Deploy_Prod
+    jobs:
+      - deployment: DeployToProd
+        environment: production     # ← this has a manual approval gate configured in Azure DevOps
+```
+
+The `environment: production` automatically pauses the pipeline until an approver clicks Approve in Azure DevOps.
+
+For `dev` — it is closer to **Continuous Deployment** because there is no approval gate. Every merge to dev automatically deploys.
+
+### Summary Table
+
+| Feature | Continuous Delivery | Continuous Deployment |
+|---|---|---|
+| Build automated | ✅ Yes | ✅ Yes |
+| Tests automated | ✅ Yes | ✅ Yes |
+| Deploy to staging automated | ✅ Yes | ✅ Yes |
+| Deploy to production | ❌ Manual approval | ✅ Fully automatic |
+| Human involvement | Yes — final approval | No — fully hands-off |
+| Risk | Lower | Higher — needs great test coverage |
+| Speed | Slightly slower | Fastest possible |
+| Used in AzureShop | ✅ Yes (prod gate) | Partially (dev env) |
+
+> **Interview tip:** *"We use Continuous Delivery for production with a manual approval gate in Azure Pipelines, and Continuous Deployment style for the dev environment where every merge auto-deploys."*
+
+---
+
+## Q12. What is an Agent in Azure Pipelines and What Are the Different Types?
+
+### What is an Agent?
+
+When you write a pipeline in Azure DevOps, you are writing a list of instructions — build this code, run these tests, deploy to Kubernetes. Those instructions need to run **somewhere**, on some actual machine.
+
+An **Agent** is that machine. It is a computer that listens for pipeline jobs from Azure DevOps and executes them.
+
+Think of Azure DevOps as a **restaurant manager** and the Agent as a **chef**:
+- The manager (Azure DevOps) receives the order (pipeline trigger)
+- The manager assigns the order to an available chef (agent)
+- The chef (agent) actually cooks the food (runs the build, tests, deploy commands)
+- When done, the chef reports back — success or failure
+
+Without an agent, the pipeline can be triggered but nothing runs.
+
+### 2 Main Types of Agents
+
+```
+Azure Pipeline Agents
+│
+├── 1. Microsoft-Hosted Agents  (cloud VM — managed by Microsoft)
+│
+└── 2. Self-Hosted Agents       (your own machine — managed by you)
+```
+
+---
+
+### Type 1 — Microsoft-Hosted Agents
+
+These are virtual machines that **Microsoft creates, manages, and destroys** automatically for you. Every time a pipeline runs, Azure spins up a fresh clean VM, runs your job, then destroys the VM.
+
+**Available images:**
+
+| Agent Image | OS | Common Use |
+|---|---|---|
+| `ubuntu-latest` | Ubuntu Linux | Most CI/CD work, Docker builds |
+| `windows-latest` | Windows Server | .NET apps, Windows-specific builds |
+| `macos-latest` | macOS | iOS/macOS app builds |
+
+**How you use it:**
+```yaml
+pool:
+  vmImage: ubuntu-latest    # ← Microsoft-hosted agent
+```
+
+**Advantages:**
+- Zero setup — Microsoft handles everything
+- Always starts clean (no leftover files from previous runs)
+- Pre-installed with common tools (Docker, kubectl, Terraform, git, Node.js, Python)
+- Free tier: 1,800 minutes/month for private projects
+
+**Disadvantages:**
+- Cannot access resources inside a private network
+- Limited free minutes — can get expensive at scale
+- Slightly slower — VM must be provisioned each time
+- Cannot install custom software permanently (it starts fresh every run)
+
+---
+
+### Type 2 — Self-Hosted Agents
+
+These are machines that **you own and manage**. You install the Azure DevOps agent software on your own server or VM. It registers itself with your Azure DevOps organization and waits for jobs.
+
+**How you use it:**
+```yaml
+pool:
+  name: MyCustomPool    # ← your self-hosted agent pool name
+```
+
+**Advantages:**
+- Full control — install any software you want permanently
+- Faster — no VM provisioning time, agent is always running
+- Can access private networks (internal databases, private ACR, etc.)
+- No minute limits — unlimited jobs
+- Can cache dependencies (node_modules, pip packages) between runs for faster builds
+
+**Disadvantages:**
+- You maintain it — security patches, updates, disk space
+- Not clean by default — previous run's files stay unless you clean up manually
+- Costs money to keep the VM running 24/7
+
+### In AzureShop
+
+Your pipelines use **Microsoft-Hosted agents:**
+```yaml
+# Every CI and CD pipeline in AzureShop
+pool:
+  vmImage: ubuntu-latest
+```
+
+This made sense because:
+- ACR is publicly accessible — no private network needed
+- Standard tools (Docker, Terraform, kubectl) come pre-installed
+- No complex custom software requirements
+
+### Visual Comparison
+
+```
+Microsoft-Hosted Agent                Self-Hosted Agent
+──────────────────────                ─────────────────
+Pipeline triggers                     Pipeline triggers
+      │                                     │
+Azure spins up fresh                  Your always-on
+VM (takes 1-2 min)                    machine picks up job
+      │                                     │
+Runs your job                         Runs your job
+      │                                     │
+VM is destroyed                       Machine stays running
+(clean for next run)                  (ready for next run)
+```
+
+### Summary Table
+
+| Feature | Microsoft-Hosted | Self-Hosted |
+|---|---|---|
+| Setup required | ❌ None | ✅ Yes — install agent software |
+| Maintenance | Microsoft handles | You handle |
+| Clean environment | ✅ Every run | ❌ Manual cleanup needed |
+| Private network access | ❌ No | ✅ Yes |
+| Custom software | ❌ Reinstall every run | ✅ Install once, stays |
+| Cost | Free tier then pay/min | Cost of running your own VM |
+| Speed | Slightly slower (provision time) | Faster (always on) |
+| Used in AzureShop | ✅ Yes (`ubuntu-latest`) | ❌ No |
+
+> **Interview tip:** *"Microsoft-Hosted agents are best for standard CI/CD workloads needing a clean environment. Self-Hosted agents are best when you need private network access, custom tools, or faster builds with dependency caching."*
+
+---
+
+## Q13. What Are Variables, Conditions, and Parameters in Azure Pipelines YAML?
+
+These are three core concepts that make Azure Pipelines flexible, reusable, and intelligent.
+
+---
+
+### Part 1 — Parameters
+
+#### What is a Parameter?
+
+A **Parameter** is an input value you pass INTO a template when calling it — like filling in a form before submitting it.
+
+Think of a template as a **cookie cutter**. The shape is the same every time, but you pass in different dough (parameters) to make different flavoured cookies. The cutter does not change — only what you put into it changes.
+
+#### Why Use Parameters?
+
+Without parameters you would write a separate pipeline for every service:
+```
+user-service-ci.yaml    — 80 lines of build logic
+cart-service-ci.yaml    — 80 lines of identical build logic
+order-service-ci.yaml   — 80 lines of identical build logic
+... (8 times)
+```
+
+With parameters you write ONE template and each service calls it with its own values. Each CI file becomes 5 lines.
+
+#### How Parameters Work in AzureShop
+
+`build-template.yaml` defines 4 parameters:
+```yaml
+parameters:
+  - name: serviceName        # e.g. "user-service"
+    type: string
+
+  - name: dockerfilePath     # e.g. "services/user-service"
+    type: string
+
+  - name: imageTag
+    type: string
+    default: $(Build.BuildId) # ← used if caller does not provide this
+
+  - name: runTests
+    type: boolean
+    default: true             # ← run tests by default
+```
+
+`user-service-ci.yaml` calls the template and passes values:
+```yaml
+- template: ../templates/build-template.yaml
+  parameters:
+    serviceName: $(SERVICE_NAME)       # → "user-service"
+    dockerfilePath: $(DOCKERFILE_PATH) # → "services/user-service"
+    imageTag: $(Build.BuildId)         # → "456"
+    runTests: true
+```
+
+Inside the template, parameters are used with `${{ parameters.name }}` syntax:
+```yaml
+docker build \
+  -t $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}
+# becomes:
+  -t acrazureshopdev.azurecr.io/user-service:456
+```
+
+---
+
+### Part 2 — Variables
+
+A **Variable** is a stored value with a name. Define it once, use it everywhere. If it changes, update one place.
+
+Think of it like a contact saved in your phone — instead of typing a phone number every time, you save it as "Mum". If her number changes, update it once.
+
+#### 3 Types of Variables
+
+**Type A — Inline Variables** (defined in the pipeline YAML file itself)
+```yaml
+# From user-service-ci.yaml
+variables:
+  - name: SERVICE_NAME
+    value: user-service
+  - name: DOCKERFILE_PATH
+    value: services/user-service
+```
+Good for values specific to one pipeline that are not sensitive.
+
+**Type B — Variable Groups** (shared collection stored in Azure DevOps Library)
+```yaml
+variables:
+  - group: vg-common    # loads ACR_NAME, ACR_LOGIN_SERVER, AKS_NAME, RESOURCE_GROUP
+  - name: SERVICE_NAME
+    value: user-service
+```
+All 8 CI pipelines load `vg-common`. Change the ACR name → update one Variable Group → all pipelines pick it up automatically.
+
+**Type C — Predefined Variables** (built into Azure DevOps — always available, never defined by you)
+
+| Variable | What it contains | Example value |
+|---|---|---|
+| `$(Build.BuildId)` | Unique number for this build | `456` |
+| `$(Build.SourceBranch)` | Branch that triggered the build | `refs/heads/dev` |
+| `$(Build.ArtifactStagingDirectory)` | Folder for storing build outputs | `/home/agent/work/1/a` |
+
+#### Variable Syntax — Two Styles (Important!)
+
+| Syntax | Resolved when | Used for |
+|---|---|---|
+| `$(variableName)` | **Runtime** — when pipeline is actually running | Variables, Variable Groups |
+| `${{ parameters.name }}` | **Compile time** — before pipeline starts | Parameters, conditional logic |
+
+---
+
+### Part 3 — Conditions
+
+A **Condition** is a rule that controls whether a step should run or be skipped — like an if statement in programming but for pipeline steps.
+
+#### Type A — Compile-Time Conditions (`${{ if }}`)
+
+Evaluated BEFORE the pipeline runs. Decides whether to even include a step.
+
+```yaml
+# From build-template.yaml
+# This entire test step is INCLUDED only if runTests = true
+# If runTests = false, this step does not exist in the pipeline at all
+
+- ${{ if eq(parameters.runTests, true) }}:
+  - script: |
+      cd ${{ parameters.dockerfilePath }}
+      npm ci && npm test --if-present
+    displayName: 'Install & Test — ${{ parameters.serviceName }}'
+```
+
+`eq` means "equals". If `runTests` equals `true` → include the step. If `false` → step does not exist.
+
+#### Type B — Runtime Conditions (`condition:`)
+
+Evaluated WHILE the pipeline is running — based on what happened in previous steps.
+
+```yaml
+# From build-template.yaml
+# Publish Trivy report ALWAYS — even if the security gate step failed
+- task: PublishBuildArtifacts@1
+  displayName: 'Publish Trivy SARIF'
+  condition: always()    # ← run this step no matter what happened before
+```
+
+**Why `condition: always()` here?**
+The previous step is the Trivy security gate — it FAILS the pipeline if it finds critical vulnerabilities. Without `condition: always()`, the publish step would be skipped on failure. But we WANT the report published even on failure so we can see WHAT vulnerabilities were found.
+
+**Common condition keywords:**
+
+| Condition | Meaning |
+|---|---|
+| `succeeded()` | Run only if all previous steps passed (this is the **default**) |
+| `failed()` | Run only if a previous step failed |
+| `always()` | Run no matter what — pass or fail |
+| `eq(variables['Build.SourceBranch'], 'refs/heads/main')` | Run only on main branch |
+
+---
+
+### How All 3 Work Together in AzureShop
+
+```
+user-service-ci.yaml
+│
+│  variables:
+│    - group: vg-common           ← Type B variable: shared ACR_NAME, AKS_NAME
+│    - SERVICE_NAME: user-service ← Type A variable: inline, this pipeline only
+│
+│  calls build-template.yaml with:
+│    parameters:
+│      serviceName: $(SERVICE_NAME)  ← passes variable value as a parameter
+│      runTests: true                ← parameter drives a condition inside template
+│
+▼
+build-template.yaml
+│
+│  ${{ if eq(parameters.runTests, true) }}  ← compile-time condition
+│    → test step IS included (runTests=true)
+│
+│  docker build -t $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}
+│                       ↑                        ↑
+│               runtime variable          compile-time parameter
+│               from vg-common            passed from caller
+│
+│  condition: always()  ← runtime condition on the publish step
+│    → report published even if security gate fails
+```
+
+### Summary Table
+
+| Concept | What it is | Syntax | Resolved when |
+|---|---|---|---|
+| Inline Variable | Value in YAML file | `$(VAR_NAME)` | Runtime |
+| Variable Group | Shared values in Azure DevOps | `$(VAR_NAME)` | Runtime |
+| Predefined Variable | Auto-provided by Azure DevOps | `$(Build.BuildId)` | Runtime |
+| Parameter | Input value passed to a template | `${{ parameters.name }}` | Compile time |
+| Compile-time Condition | Include/exclude step based on parameter | `${{ if eq(...) }}` | Compile time |
+| Runtime Condition | Run/skip step based on pipeline state | `condition: always()` | Runtime |
+
+> **Interview tip:** *"Parameters make templates reusable — one template serves all 8 services. Variable Groups centralise shared config so we don't repeat ACR name and AKS name in every pipeline. Conditions control flow — `${{ if }}` to optionally skip tests, and `condition: always()` to ensure Trivy reports are published even when the security gate fails."*
