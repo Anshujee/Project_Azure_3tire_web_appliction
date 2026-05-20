@@ -1,7 +1,7 @@
 # Phase 5 — Azure Pipelines CI/CD: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs vs deployment jobs, reusable templates, Variable Groups, secret variables, Service Connections, image promotion, environment approval gates, path-based triggers, trigger vs pr, terraform plan-then-apply, Continuous Delivery vs Continuous Deployment deep dive, agent types, YAML variables/conditions/parameters.
+Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs vs deployment jobs, reusable templates, Variable Groups, secret variables, Service Connections, image promotion, environment approval gates, path-based triggers, trigger vs pr, terraform plan-then-apply, Continuous Delivery vs Continuous Deployment deep dive, agent types, YAML variables/conditions/parameters, path-based triggers deep dive, secret variables real-world usage, Service Connection full detail, Environments vs Environment Variables.
 
 ---
 
@@ -20,6 +20,10 @@ Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs v
 11. [What is the Difference Between Continuous Delivery and Continuous Deployment?](#q11-what-is-the-difference-between-continuous-delivery-and-continuous-deployment)
 12. [What is an Agent in Azure Pipelines and What Are the Different Types?](#q12-what-is-an-agent-in-azure-pipelines-and-what-are-the-different-types)
 13. [What Are Variables, Conditions, and Parameters in Azure Pipelines YAML?](#q13-what-are-variables-conditions-and-parameters-in-azure-pipelines-yaml)
+14. [What is a Path-Based Trigger and How Does It Work in AzureShop?](#q14-what-is-a-path-based-trigger-and-how-does-it-work-in-azureshop)
+15. [What is the Concept of Secret Variables and How Are They Used?](#q15-what-is-the-concept-of-secret-variables-and-how-are-they-used)
+16. [What is a Service Connection and How Is It Used in AzureShop Pipelines?](#q16-what-is-a-service-connection-and-how-is-it-used-in-azureshop-pipelines)
+17. [What is the Difference Between Environments and Environment Variables?](#q17-what-is-the-difference-between-environments-and-environment-variables)
 
 ---
 
@@ -901,3 +905,370 @@ build-template.yaml
 | Runtime Condition | Run/skip step based on pipeline state | `condition: always()` | Runtime |
 
 > **Interview tip:** *"Parameters make templates reusable — one template serves all 8 services. Variable Groups centralise shared config so we don't repeat ACR name and AKS name in every pipeline. Conditions control flow — `${{ if }}` to optionally skip tests, and `condition: always()` to ensure Trivy reports are published even when the security gate fails."*
+
+---
+
+## Q14. What is a Path-Based Trigger and How Does It Work in AzureShop?
+
+### What is a Trigger?
+
+A **trigger** is the event that tells Azure Pipelines to start running. Without a trigger, a pipeline only runs when someone manually clicks Run. There are two types:
+- **Branch trigger** — runs when code is pushed to a specific branch
+- **Path-based trigger** — runs only when code changes inside a specific folder
+
+### The Problem Without Path-Based Triggers
+
+AzureShop has 8 services, each with its own CI pipeline. Without path-based triggers, changing one line in `user-service` would trigger ALL 8 pipelines — 7 unnecessary Docker builds, 7 unnecessary Trivy scans, 7 unnecessary image pushes to ACR. Wasted pipeline minutes and slower feedback.
+
+### How It Works in AzureShop
+
+```yaml
+# From user-service-ci.yaml
+trigger:
+  branches:
+    include:
+      - dev
+      - feature/*
+  paths:
+    include:
+      - services/user-service/**   # only trigger if files here changed
+                                   # ** = any file, any subfolder depth
+pr:
+  branches:
+    include:
+      - dev
+  paths:
+    include:
+      - services/user-service/**
+```
+
+In plain English: "Start this pipeline ONLY when someone pushes to `dev` or a `feature/*` branch AND the changed files are inside `services/user-service/`."
+
+### Visual Example
+
+```
+Developer changes services/user-service/src/index.js and pushes to dev:
+  user-service-ci.yaml   ✅ TRIGGERS — file inside services/user-service/
+  cart-service-ci.yaml   ❌ SKIPPED  — no files changed there
+  frontend-ci.yaml       ❌ SKIPPED  — no files changed there
+  (all other 5 pipelines also skipped)
+```
+
+### `trigger` vs `pr` — What is the Difference?
+
+| | `trigger` | `pr` |
+|---|---|---|
+| When it fires | Code is **pushed/merged** to a branch | A **Pull Request is opened or updated** |
+| Purpose | Run full CI after merge, push image to ACR | Validate code before merge — no push to ACR |
+| In AzureShop | Fires on push to `dev` or `feature/*` | Fires when PR targets `dev` |
+
+### Full Flow in AzureShop
+
+```
+Push to feature/fix-login (touches services/user-service/)
+  → pr: trigger fires → tests + build + trivy (no ACR push) — validates PR
+  → PR approved and merged to dev
+  → trigger: fires → full CI → image pushed to ACR → deploy-dev triggered
+```
+
+> **Interview tip:** *"Path-based triggers ensure only the relevant service pipeline runs when code changes. In AzureShop, changing user-service code only triggers user-service-ci.yaml — not all 8 pipelines. This saves pipeline minutes, speeds up feedback, and prevents unnecessary image builds."*
+
+---
+
+## Q15. What is the Concept of Secret Variables and How Are They Used?
+
+### What is a Secret Variable?
+
+A **Secret Variable** is a variable whose value is:
+- **Encrypted** — stored in encrypted form, not plain text
+- **Masked in logs** — replaced with `***` in every pipeline log automatically
+- **Never visible** — even pipeline authors cannot read the value back after saving it
+- **Never in YAML** — the value lives in Azure DevOps, not in your code
+
+Think of it like a bank vault PIN — you can use it to open the vault, but it never gets printed on any receipt.
+
+### The Problem Without Secret Variables
+
+```yaml
+# ❌ NEVER DO THIS — credentials hardcoded in YAML
+variables:
+  SQL_PASSWORD: MyStr0ng@Password123   # visible to everyone with repo access
+  # if git repo leaks, your entire Azure subscription is compromised
+```
+
+### 3 Ways to Use Secret Variables
+
+**Way 1 — Secret variable in Variable Group (what AzureShop uses):**
+- Go to Azure DevOps → Library → Variable Groups → vg-prod
+- Add variable, type the value, click the lock icon 🔒 → it becomes a secret
+- Reference in YAML: `- group: vg-prod` — only the NAME, never the value
+
+**Way 2 — Variable Group linked to Azure Key Vault (most secure):**
+- Azure DevOps fetches the secret directly from Key Vault at pipeline runtime
+- Secret never lives in Azure DevOps — only in Key Vault
+- One source of truth, full audit trail on every access
+
+**Way 3 — Inline pipeline secret (least secure, avoid for production)**
+
+### The `env:` Block — Most Important Rule
+
+Secret variables are NOT automatically injected into all steps. You must explicitly inject them into only the specific step that needs them:
+
+```yaml
+# From terraform-apply.yaml in AzureShop
+- task: AzureCLI@2
+  displayName: 'terraform plan — dev'
+  inputs:
+    inlineScript: |
+      terraform plan -var-file="environments/dev/terraform.tfvars"
+  env:
+    TF_VAR_sql_admin_password: $(TF_VAR_SQL_ADMIN_PASSWORD)
+    # only THIS step sees the secret — not the whole pipeline
+    # logs show: TF_VAR_sql_admin_password=***
+```
+
+### In AzureShop — Secret Flow
+
+```
+Azure Key Vault → stores sql-admin-password
+      ↓ Terraform writes secrets during terraform apply
+Variable Group vg-prod → TF_VAR_SQL_ADMIN_PASSWORD = *** (locked)
+      ↓ Pipeline loads vg-prod
+terraform-apply.yaml → injects via env: block into Terraform steps only
+      ↓ Terraform reads it, writes to Key Vault
+AKS pods → CSI driver mounts from Key Vault as env vars inside pods
+Secret NEVER touches YAML or git at any point
+```
+
+### In a Real IT Company
+
+- Dev secrets → Variable Group (vg-dev)
+- Staging/prod secrets → Variable Group linked to Key Vault
+- Rotation every 90 days — update in Key Vault, no YAML changes needed
+- Audit log: every secret access recorded in Key Vault
+
+### Golden Rules
+
+| Rule | Why |
+|---|---|
+| Never write secrets in YAML | YAML is in git — git history is permanent |
+| Never `echo` a secret in a script | Appears in pipeline logs |
+| Use `env:` block to inject only into steps that need it | Least privilege |
+| Separate Variable Groups per environment | Dev secrets should never reach prod pipelines |
+| Link prod Variable Groups to Key Vault | One source of truth, full audit trail |
+
+> **Interview tip:** *"In AzureShop, the SQL admin password is stored as a secret in `vg-prod` Variable Group. It is never written in any YAML file. In terraform-apply pipeline it is injected via the `env:` block only into specific Terraform steps. In logs it always appears as `***`. For production, we link the Variable Group to Azure Key Vault so the secret never lives in Azure DevOps at all."*
+
+---
+
+## Q16. What is a Service Connection and How Is It Used in AzureShop Pipelines?
+
+### What is a Service Connection?
+
+A **Service Connection** is a secure, named bridge between Azure DevOps and an external service (like Azure, GitHub, Docker Hub). It stores credentials encrypted inside Azure DevOps — your pipeline YAML only refers to it by NAME, never by actual credentials.
+
+Think of it like a hotel key card — you swipe the card (`sc-azureshop-azure`) to enter the room (Azure subscription). The card handles authentication. You never carry the master key (client secret).
+
+### The Problem Without It
+
+```yaml
+# ❌ NEVER DO THIS
+variables:
+  AZURE_CLIENT_SECRET: MyS3cretP@ssword  # visible to everyone in repo
+  # if leaked, your entire Azure subscription is compromised
+```
+
+### How It Works at Runtime
+
+```
+Pipeline hits AzureCLI@2 task with azureSubscription: sc-azureshop-azure
+      ↓
+Azure DevOps resolves the name → fetches encrypted Service Principal credentials
+      ↓
+Runs az login --service-principal (automatically, invisibly)
+      ↓
+Gets a short-lived access token (valid ~1 hour)
+      ↓
+Your script runs in an already-authenticated shell
+Pipeline agent NEVER sees the client secret — logs show NO credentials
+```
+
+### In AzureShop — `sc-azureshop-azure` Used in 16 Places
+
+**Service Principal behind it:** `sp-azureshop-terraform` with `Contributor` role on the Azure subscription.
+
+**4 main use cases:**
+
+**Use Case 1 — ACR Login (build-template.yaml):**
+```yaml
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: sc-azureshop-azure
+    inlineScript: |
+      az acr login --name $(ACR_NAME)
+      # Docker is now authenticated to push images to ACR
+```
+
+**Use Case 2 — Connect kubectl to AKS (deploy-template.yaml):**
+```yaml
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: sc-azureshop-azure
+    inlineScript: |
+      az aks get-credentials --resource-group $(RESOURCE_GROUP) --name $(AKS_NAME)
+      # kubectl and helm now work — no Kubernetes password in YAML
+```
+
+**Use Case 3 — Terraform runs (terraform-apply.yaml, 9 times):**
+```yaml
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: sc-azureshop-azure
+    inlineScript: |
+      terraform init && terraform plan && terraform apply
+      # Terraform can now create/modify all Azure resources
+```
+
+**Use Case 4 — Terraform validate on PRs (terraform-validate.yaml):**
+```yaml
+- task: AzureCLI@2
+  inputs:
+    azureSubscription: sc-azureshop-azure
+    inlineScript: |
+      terraform plan -no-color 2>&1 | tee plan-output.txt
+      # Read-only plan — shows what infra would change on every PR
+```
+
+### Security Properties
+
+| Property | Benefit |
+|---|---|
+| Credentials encrypted in Azure DevOps | Never in YAML or git |
+| Agent never sees client secret | Cannot be logged or leaked |
+| Short-lived access tokens at runtime | Even if intercepted, expires in ~1 hour |
+| Scoped to specific subscription | Cannot access other subscriptions |
+| Auditable | Azure AD logs every action the SP takes |
+| Rotatable | Update secret in Service Connection → all pipelines pick it up, no YAML changes |
+
+### In Real Companies
+
+One Service Connection per environment:
+```
+sc-azureshop-dev     → Contributor on dev subscription only
+sc-azureshop-staging → Contributor on staging subscription only
+sc-azureshop-prod    → Contributor on prod subscription only (restricted access)
+```
+In AzureShop we used one for all environments because it is a learning project. In production, always separate them.
+
+> **Interview tip:** *"A Service Connection is a named, encrypted credential store that allows pipelines to authenticate to Azure without any credentials in YAML. In AzureShop, `sc-azureshop-azure` uses a Service Principal with Contributor role on our subscription. It is referenced 16 times across our pipelines — for ACR login, AKS access, and Terraform runs. The pipeline agent never sees the actual client secret — Azure DevOps handles authentication transparently using short-lived tokens at runtime."*
+
+---
+
+## Q17. What is the Difference Between Environments and Environment Variables?
+
+### The Core Difference in One Line
+
+- **Environment** = the **destination** you are deploying TO (a place in Azure DevOps)
+- **Environment Variable** = the **settings** you use WHILE deploying (configuration values)
+
+| | Environment | Environment Variable |
+|---|---|---|
+| What it is | Deployment target in Azure DevOps UI | A name-value pair used in pipeline steps |
+| Lives in | Azure DevOps (Pipelines → Environments) | YAML file or Variable Group |
+| Purpose | Track deployments, enforce approval gates | Pass configuration values to steps |
+| In YAML | `environment: dev` inside deployment job | `$(VARIABLE_NAME)` anywhere |
+| Example | `dev`, `staging`, `prod` | `K8S_NAMESPACE=dev`, `REPLICAS=1` |
+
+### Part 1 — What is an Environment?
+
+An **Environment** in Azure Pipelines is a logical deployment target — a checkpoint in your release journey created in the Azure DevOps UI. It does NOT run any code. It provides:
+
+**1. Deployment History** — every pipeline deployment is recorded:
+```
+Environments → dev → Deployments
+  ✅ Build #456 — deployed by Anshu — 2026-05-20 10:30 — success
+  ✅ Build #455 — deployed by Anshu — 2026-05-19 14:15 — success
+  ❌ Build #454 — deployed by Anshu — 2026-05-19 09:00 — failed
+```
+
+**2. Approval Gates** — configured in the UI, NOT in YAML:
+```
+dev     → no approval gate → deploys automatically
+staging → no approval gate → deploys automatically
+prod    → MANUAL APPROVAL  → pipeline pauses, waits for team lead
+```
+A developer cannot bypass the approval gate by changing YAML — it is enforced by Azure DevOps.
+
+**How Environments are used in AzureShop:**
+```yaml
+# deploy-dev.yaml
+- deployment: DeployAllServices
+  environment: dev          # no gate — auto-deploys
+
+# deploy-staging.yaml
+- deployment: DeployAllServices
+  environment: staging      # no gate — auto-deploys
+
+# deploy-prod.yaml
+- deployment: DeployAllServices
+  environment: prod         # MANUAL APPROVAL GATE — pauses here
+  timeoutInMinutes: 120     # cancels if no approval within 2 hours
+```
+
+### Part 2 — What are Environment Variables?
+
+**Environment Variables** are name-value pairs that configure what the pipeline actually does — which cluster to connect to, which namespace to use, how many replicas to run.
+
+**In AzureShop — 3 Variable Groups (one per environment):**
+
+| Variable | vg-dev | vg-staging | vg-prod |
+|---|---|---|---|
+| `ENVIRONMENT` | dev | staging | prod |
+| `K8S_NAMESPACE` | dev | staging | prod |
+| `AKS_NAME` | aks-azureshop-dev | aks-azureshop-staging | aks-azureshop-prod |
+| `RESOURCE_GROUP` | rg-azureshop-dev | rg-azureshop-staging | rg-azureshop-prod |
+| `REPLICAS` | 1 | 2 | 3 |
+
+**How they are used in the pipeline:**
+```yaml
+# deploy-dev.yaml
+variables:
+  - group: vg-common   # shared vars
+  - group: vg-dev      # loads ENVIRONMENT, K8S_NAMESPACE, AKS_NAME, REPLICAS
+
+# These values flow into every deploy-template call:
+- template: ../templates/deploy-template.yaml
+  parameters:
+    namespace: $(K8S_NAMESPACE)   # → "dev"
+    replicas: $(REPLICAS)         # → 1
+    helmValuesFile: helm/values/dev.yaml
+
+# And inside the template:
+az aks get-credentials --name $(AKS_NAME)          # → aks-azureshop-dev
+kubectl create namespace $(K8S_NAMESPACE)           # → dev
+helm upgrade --set replicaCount=${{ parameters.replicas }}  # → 1
+```
+
+### How Both Work Together — The Complete Picture
+
+```
+deploy-staging.yaml
+│
+│  variables:
+│    - group: vg-staging      ← ENVIRONMENT VARIABLES
+│      K8S_NAMESPACE=staging     (tells pipeline HOW and WHERE to deploy)
+│      AKS_NAME=aks-azureshop-staging
+│      REPLICAS=2
+│
+│  jobs:
+│    - deployment: DeployAllServices
+│      environment: staging   ← AZURE PIPELINES ENVIRONMENT
+│                                (records deployment, checks approval gate)
+```
+
+**Why the same deploy template works for all 3 environments:**
+- The template logic never changes
+- Swap `vg-dev` → `vg-staging` → `vg-prod` and the template automatically deploys to the right cluster, namespace, and replica count
+- The `environment:` keyword changes only the checkpoint that Azure DevOps records against
+
+> **Interview tip:** *"In AzureShop, Environments and Environment Variables solve two completely different problems. The Azure Pipelines `environment: dev/staging/prod` tracks deployment history and enforces approval gates — prod has a manual gate, dev and staging auto-deploy. The Variable Groups `vg-dev/vg-staging/vg-prod` configure what the deployment does — which AKS cluster to connect to, which namespace, how many replicas. The same deploy template works for all three environments just by swapping the Variable Group."*
