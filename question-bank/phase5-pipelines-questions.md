@@ -1,7 +1,7 @@
 # Phase 5 — Azure Pipelines CI/CD: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs vs deployment jobs, reusable templates, Variable Groups, secret variables, Service Connections, image promotion, environment approval gates, path-based triggers, trigger vs pr, terraform plan-then-apply, Continuous Delivery vs Continuous Deployment deep dive, agent types, YAML variables/conditions/parameters, path-based triggers deep dive, secret variables real-world usage, Service Connection full detail, Environments vs Environment Variables.
+Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs vs deployment jobs, reusable templates, Variable Groups, secret variables, Service Connections, image promotion, environment approval gates, path-based triggers, trigger vs pr, terraform plan-then-apply, Continuous Delivery vs Continuous Deployment deep dive, agent types, YAML variables/conditions/parameters, path-based triggers deep dive, secret variables real-world usage, Service Connection full detail, Environments vs Environment Variables, Variable Group storage location and runtime reading mechanism.
 
 ---
 
@@ -24,6 +24,7 @@ Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs v
 15. [What is the Concept of Secret Variables and How Are They Used?](#q15-what-is-the-concept-of-secret-variables-and-how-are-they-used)
 16. [What is a Service Connection and How Is It Used in AzureShop Pipelines?](#q16-what-is-a-service-connection-and-how-is-it-used-in-azureshop-pipelines)
 17. [What is the Difference Between Environments and Environment Variables?](#q17-what-is-the-difference-between-environments-and-environment-variables)
+18. [Where Are Variable Groups Stored, How Are They Created, and How Does a Pipeline Read Them?](#q18-where-are-variable-groups-stored-how-are-they-created-and-how-does-a-pipeline-read-them)
 
 ---
 
@@ -1272,3 +1273,204 @@ deploy-staging.yaml
 - The `environment:` keyword changes only the checkpoint that Azure DevOps records against
 
 > **Interview tip:** *"In AzureShop, Environments and Environment Variables solve two completely different problems. The Azure Pipelines `environment: dev/staging/prod` tracks deployment history and enforces approval gates — prod has a manual gate, dev and staging auto-deploy. The Variable Groups `vg-dev/vg-staging/vg-prod` configure what the deployment does — which AKS cluster to connect to, which namespace, how many replicas. The same deploy template works for all three environments just by swapping the Variable Group."*
+
+---
+
+## Q18. Where Are Variable Groups Stored, How Are They Created, and How Does a Pipeline Read Them?
+
+> **Note:** Q6 covered WHAT Variable Groups are and WHY we use them. This question is a deeper dive into storage location, creation method, and the runtime reading mechanism.
+
+### 1. Where Are Variable Groups Stored?
+
+Variable Groups are stored **inside Azure DevOps Library** — completely separate from your git repository. They are NOT in any file in your repo, which is why you cannot find them on GitHub or Azure Repos.
+
+```
+Azure DevOps
+│
+└── Project: AzureShop
+      │
+      └── Pipelines
+            │
+            └── Library          ← Variable Groups live here
+                  │
+                  ├── vg-common
+                  ├── vg-dev
+                  ├── vg-staging
+                  └── vg-prod
+```
+
+**Exact navigation in Azure DevOps UI:**
+```
+Pipelines → Library → Variable Groups → select group → view/edit variables
+```
+
+**Why NOT in git?**
+- Git is visible to anyone with repo access
+- Variable Groups can contain secrets (passwords, keys)
+- Azure DevOps encrypts values at rest — git cannot do that
+- If the repo is ever leaked or made public, no secrets are exposed
+
+---
+
+### 2. How Are Variable Groups Created — Manual or Automatic?
+
+**They are created MANUALLY by the DevOps engineer** in the Azure DevOps UI. Nothing creates them automatically.
+
+Here is exactly how the 4 Variable Groups in AzureShop were created:
+
+**Step 1 — Go to Azure DevOps Library:**
+```
+Pipelines → Library → + Variable Group
+```
+
+**Step 2 — Create `vg-common`:**
+```
+Name: vg-common
+Variables:
+  ACR_NAME         = acrazureshopdev
+  ACR_LOGIN_SERVER = acrazureshopdev.azurecr.io
+```
+
+**Step 3 — Create `vg-dev`:**
+```
+Name: vg-dev
+Variables:
+  ENVIRONMENT    = dev
+  AKS_NAME       = aks-azureshop-dev
+  RESOURCE_GROUP = rg-azureshop-dev
+  K8S_NAMESPACE  = dev
+  REPLICAS       = 1
+```
+
+**Step 4 — Create `vg-staging`:**
+```
+Name: vg-staging
+Variables:
+  ENVIRONMENT    = staging
+  AKS_NAME       = aks-azureshop-staging
+  RESOURCE_GROUP = rg-azureshop-staging
+  K8S_NAMESPACE  = staging
+  REPLICAS       = 2
+```
+
+**Step 5 — Create `vg-prod` with a secret:**
+```
+Name: vg-prod
+Variables:
+  ENVIRONMENT                = prod
+  AKS_NAME                   = aks-azureshop-prod
+  RESOURCE_GROUP             = rg-azureshop-prod
+  K8S_NAMESPACE              = prod
+  REPLICAS                   = 3
+  TF_VAR_SQL_ADMIN_PASSWORD  = MyStr0ng@Pass  🔒 (click lock icon → becomes secret)
+```
+
+**Step 6 — Grant pipeline access:**
+```
+Library → vg-common → Pipeline permissions → + → select pipeline
+```
+Only authorised pipelines can read the Variable Group. Other pipelines cannot access it.
+
+---
+
+### 3. How Does a Pipeline Read Variable Group Values at Runtime?
+
+Here is the exact step-by-step flow of what happens when a pipeline runs:
+
+**Step 1 — Pipeline is triggered** (code push, PR, or manual run)
+
+**Step 2 — Azure DevOps reads the YAML:**
+```yaml
+# deploy-dev.yaml
+variables:
+  - group: vg-common    # ← Azure DevOps sees this
+  - group: vg-dev       # ← and this
+```
+
+**Step 3 — Azure DevOps fetches values from Library:**
+```
+"Give me all variables from vg-common"
+  → ACR_NAME = acrazureshopdev
+  → ACR_LOGIN_SERVER = acrazureshopdev.azurecr.io
+
+"Give me all variables from vg-dev"
+  → ENVIRONMENT = dev
+  → AKS_NAME = aks-azureshop-dev
+  → RESOURCE_GROUP = rg-azureshop-dev
+  → K8S_NAMESPACE = dev
+  → REPLICAS = 1
+```
+
+**Step 4 — All values injected as environment variables into the pipeline run (in memory only — never written to disk)**
+
+**Step 5 — Every step reads them with `$(VARIABLE_NAME)` syntax:**
+```yaml
+az aks get-credentials \
+  --resource-group $(RESOURCE_GROUP)  # → rg-azureshop-dev
+  --name $(AKS_NAME)                  # → aks-azureshop-dev
+
+kubectl create namespace $(K8S_NAMESPACE)        # → dev
+helm upgrade --set replicaCount=$(REPLICAS)      # → 1
+```
+
+**Step 6 — For SECRET variables — extra protection:**
+
+Secret variables are NOT auto-injected into every step. You must explicitly inject them into only the step that needs them:
+```yaml
+- task: AzureCLI@2
+  inputs:
+    inlineScript: |
+      terraform plan -var-file="environments/dev/terraform.tfvars"
+  env:
+    TF_VAR_sql_admin_password: $(TF_VAR_SQL_ADMIN_PASSWORD)
+    # only THIS step gets the secret — shown as *** in all logs
+```
+
+**Step 7 — Pipeline finishes → all values discarded from memory. Never stored anywhere.**
+
+---
+
+### Complete Runtime Flow — Visual
+
+```
+Developer pushes code to dev branch
+          │
+          ▼
+Azure DevOps triggers deploy-dev.yaml
+          │
+          ▼
+Reads YAML → sees: - group: vg-common
+                   - group: vg-dev
+          │
+          ▼
+Fetches values from Library (Azure DevOps internal)
+          │
+          ▼
+Injects all values as environment variables
+into the pipeline run (in memory only)
+          │
+          ▼
+Each step reads $(VARIABLE_NAME) → replaced with actual value
+Secret variables → only via env: block in specific steps → *** in logs
+          │
+          ▼
+Pipeline finishes → all variable values discarded
+Never written to disk, never stored on agent machine
+```
+
+---
+
+### Summary Table
+
+| Question | Answer |
+|---|---|
+| Where stored? | Azure DevOps Library — NOT in git |
+| Created manually or auto? | **Manually** by DevOps engineer in the UI |
+| Who can read them? | Only pipelines explicitly granted permission |
+| When are they loaded? | At pipeline start — before any step runs |
+| How injected? | As environment variables into the pipeline run |
+| Secret variables injected differently? | Yes — only via `env:` block into specific steps |
+| Values on disk? | Never — only in memory during the pipeline run |
+| Visible in logs? | Normal vars: yes. Secret vars: always `***` |
+
+> **Interview tip:** *"Variable Groups are created manually in Azure DevOps Library — never in git. When a pipeline runs, Azure DevOps reads the YAML, fetches the named Variable Group from Library, and injects all values as environment variables into the pipeline run before any step executes. Secret variables must be explicitly injected into specific steps using the `env:` block and always appear as `***` in logs. Values exist only in memory during the run and are discarded when the pipeline finishes."*
