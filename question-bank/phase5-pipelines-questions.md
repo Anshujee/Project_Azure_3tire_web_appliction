@@ -1,7 +1,7 @@
 # Phase 5 — Azure Pipelines CI/CD: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs vs deployment jobs, reusable templates, Variable Groups, secret variables, Service Connections, image promotion, environment approval gates, path-based triggers, trigger vs pr, terraform plan-then-apply, Continuous Delivery vs Continuous Deployment deep dive, agent types, YAML variables/conditions/parameters, path-based triggers deep dive, secret variables real-world usage, Service Connection full detail, Environments vs Environment Variables, Variable Group storage location and runtime reading mechanism.
+Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs vs deployment jobs, reusable templates, Variable Groups, secret variables, Service Connections, image promotion, environment approval gates, path-based triggers, trigger vs pr, terraform plan-then-apply, Continuous Delivery vs Continuous Deployment deep dive, agent types, YAML variables/conditions/parameters, path-based triggers deep dive, secret variables real-world usage, Service Connection full detail, Environments vs Environment Variables, Variable Group storage location and runtime reading mechanism, Service Principal vs Service Connection, all Azure services used in Phase 5 with AZ-104/AZ-400 exam context.
 
 ---
 
@@ -25,6 +25,8 @@ Covers: CI vs CD vs Continuous Deployment, pipeline structure, fail fast, jobs v
 16. [What is a Service Connection and How Is It Used in AzureShop Pipelines?](#q16-what-is-a-service-connection-and-how-is-it-used-in-azureshop-pipelines)
 17. [What is the Difference Between Environments and Environment Variables?](#q17-what-is-the-difference-between-environments-and-environment-variables)
 18. [Where Are Variable Groups Stored, How Are They Created, and How Does a Pipeline Read Them?](#q18-where-are-variable-groups-stored-how-are-they-created-and-how-does-a-pipeline-read-them)
+19. [What is the Difference Between a Service Principal and a Service Connection?](#q19-what-is-the-difference-between-a-service-principal-and-a-service-connection)
+20. [What Are All the Azure Services Used in Phase 5 and How Are They Used?](#q20-what-are-all-the-azure-services-used-in-phase-5-and-how-are-they-used)
 
 ---
 
@@ -1472,5 +1474,331 @@ Never written to disk, never stored on agent machine
 | Secret variables injected differently? | Yes — only via `env:` block into specific steps |
 | Values on disk? | Never — only in memory during the pipeline run |
 | Visible in logs? | Normal vars: yes. Secret vars: always `***` |
+
+---
+
+## Q19: What is the Difference Between a Service Principal and a Service Connection?
+
+### The Simple Answer
+
+Think of it this way:
+- **Service Principal** = a **user account for an app** in Azure. It's an identity that Azure AD recognises. It has a username (Client ID), a password (Client Secret), and roles assigned to it.
+- **Service Connection** = a **locker in Azure DevOps** that securely holds the Service Principal's credentials. Pipelines look up the locker by name — they never see the actual credentials inside.
+
+**One sentence:** The Service Principal is the WHO (the identity doing the work in Azure). The Service Connection is the HOW (how Azure DevOps safely passes that identity to your pipeline).
+
+---
+
+### Service Principal — What It Is
+
+A Service Principal (SP) is a non-human identity in Azure Active Directory. You create it when you want an application, script, or pipeline to authenticate to Azure resources — without using a real person's username and password.
+
+**Every Service Principal has 4 key properties:**
+
+| Property | What It Is | Example |
+|---|---|---|
+| Client ID | Unique ID of the SP | `a1b2c3d4-...` |
+| Client Secret | Password (rotate regularly!) | `Kj8x...` (never share) |
+| Tenant ID | Your Azure AD directory ID | `f9e8d7...` |
+| Role Assignment | What it can do in Azure | `Contributor` on subscription |
+
+**In AzureShop:** `sp-azureshop-terraform` is the Service Principal.
+- It has `Contributor` role on the entire Azure subscription
+- This means it can create, modify, and delete any Azure resource
+- Terraform uses it to create AKS, Key Vault, ACR, VNet, etc.
+- Azure CLI (`az acr login`, `az aks get-credentials`) uses it to authenticate
+
+---
+
+### Service Connection — What It Is
+
+A Service Connection is a named, encrypted credential store inside **Azure DevOps** (Pipelines → Service Connections). It wraps a Service Principal so pipelines can use it safely.
+
+**The key benefit:** Your YAML file never contains Client ID, Client Secret, or Tenant ID. It only contains the Service Connection *name*. The actual credentials are encrypted and stored in Azure DevOps — separate from your code.
+
+**In AzureShop:** `sc-azureshop-azure` is the Service Connection.
+- It wraps `sp-azureshop-terraform`'s credentials (Client ID, Client Secret, Tenant ID)
+- It is referenced **16 times** across all pipelines
+- YAML always uses it like this: `azureSubscription: sc-azureshop-azure`
+- No actual credentials ever appear in any YAML or git file
+
+---
+
+### How They Work Together at Runtime
+
+When a pipeline step uses `azureSubscription: sc-azureshop-azure`, here is exactly what happens:
+
+```
+Pipeline triggers
+    ↓
+Azure DevOps reads YAML → finds azureSubscription: sc-azureshop-azure
+    ↓
+Azure DevOps fetches encrypted SP credentials from Service Connection storage
+    ↓
+Azure DevOps runs: az login --service-principal -u <clientId> -p <clientSecret> --tenant <tenantId>
+    (this happens INVISIBLY — the pipeline agent never sees the credentials)
+    ↓
+Azure AD validates the Service Principal → issues a short-lived access token
+    ↓
+Your script runs in an already-authenticated shell
+    (az acr login, az aks get-credentials, terraform apply — all work transparently)
+    ↓
+Pipeline finishes → token expires → credentials discarded
+```
+
+**The agent never sees the Client Secret.** Azure DevOps handles the entire authentication step invisibly before your script runs.
+
+---
+
+### The Relationship — One SP, One Service Connection
+
+```
+Azure Active Directory (Azure AD)
+└── sp-azureshop-terraform   ← the actual identity
+    ├── Client ID: a1b2c3...
+    ├── Client Secret: Kj8x...
+    ├── Tenant ID: f9e8d7...
+    └── Role: Contributor on subscription
+        ↑
+        │  (Service Connection wraps and stores these credentials securely)
+        │
+Azure DevOps Library
+└── sc-azureshop-azure        ← the secure wrapper
+    └── Referenced in YAML as: azureSubscription: sc-azureshop-azure
+```
+
+---
+
+### Where sc-azureshop-azure Is Used in AzureShop (16 places)
+
+| Pipeline File | How Many Times | What It Does |
+|---|---|---|
+| `build-template.yaml` | 1 | `az acr login` — authenticate Docker to push images to ACR |
+| `deploy-template.yaml` | 1 | `az aks get-credentials` — get kubectl access to AKS cluster |
+| `deploy-dev.yaml` | 1 | AKS credentials for dev deployment |
+| `deploy-staging.yaml` | 1 | AKS credentials for staging deployment |
+| `deploy-prod.yaml` | 1 | AKS credentials for prod deployment |
+| `terraform-apply.yaml` | 9 | terraform init, plan, apply for all 3 environments |
+| `terraform-validate.yaml` | 2 | terraform init, plan on PRs (read-only validation) |
+
+**Total: 16 references across 7 pipeline files.**
+
+---
+
+### Real Company Practice
+
+In real companies, you create one Service Connection per environment:
+
+```
+sc-company-azure-dev       → SP with Contributor on dev subscription
+sc-company-azure-staging   → SP with Contributor on staging subscription  
+sc-company-azure-prod      → SP with Reader + specific roles on prod (least privilege)
+```
+
+**Why separate SPs per environment?** If the dev Service Connection is compromised (credentials leak), the attacker can only access the dev subscription. Prod is completely safe.
+
+In AzureShop we use one SP with Contributor on the full subscription — fine for a learning project, but not recommended for real production use.
+
+---
+
+### Side-by-Side Comparison
+
+| | Service Principal | Service Connection |
+|---|---|---|
+| **Lives in** | Azure Active Directory | Azure DevOps Library |
+| **What it is** | An identity (like a user account for an app) | A secure credential store |
+| **Contains** | Client ID, Client Secret, Tenant ID, Role assignments | Encrypted SP credentials + pipeline permissions |
+| **Who sees it** | Azure — it validates the SP on every login | Azure DevOps — it fetches creds and authenticates invisibly |
+| **In YAML** | Never referenced directly | `azureSubscription: sc-azureshop-azure` |
+| **In AzureShop** | `sp-azureshop-terraform` | `sc-azureshop-azure` |
+| **Role** | Contributor on Azure subscription | Referenced 16 times across all pipelines |
+
+---
+
+### Interview Tip
+
+> "A Service Principal is an identity in Azure Active Directory — it is what Azure sees doing the work. In AzureShop, `sp-azureshop-terraform` has Contributor role on our subscription. A Service Connection is Azure DevOps' secure wrapper around that SP — it stores credentials encrypted so pipelines reference it by name (`sc-azureshop-azure`) without ever exposing the Client Secret. The SP is the WHO. The Service Connection is the HOW. Together they allow 16 pipeline steps across 7 files to authenticate to Azure without a single credential ever appearing in YAML or git."
+
+---
+
+## Q20: What Are All the Azure Services Used in Phase 5 and How Are They Used?
+
+> **Exam Context:** This question is designed for AZ-104 (Azure Administrator) and AZ-400 (Azure DevOps Engineer Expert) certification preparation. Each service includes exam focus areas and relevance ratings.
+
+---
+
+### Overview — 7 Azure Services in Phase 5
+
+Phase 5 is the Azure Pipelines CI/CD phase. The pipelines USE Azure services to build, secure, store, and deploy the application. Here are all 7 services:
+
+---
+
+### 1. Azure DevOps / Azure Pipelines
+
+**What it is:** The CI/CD platform itself. Every pipeline lives here.
+
+**How it is used in Phase 5:**
+- **13 YAML pipeline files:** 8 service CI pipelines, 3 CD deploy pipelines (dev/staging/prod), terraform-apply, terraform-validate
+- **Reusable templates:** `build-template.yaml` (used by all 8 CI pipelines), `deploy-template.yaml` (used by all 3 CD pipelines)
+- **Variable Groups:** `vg-common`, `vg-dev`, `vg-staging`, `vg-prod` — stored in Azure DevOps Library
+- **Environments:** `dev`, `staging`, `prod` — with prod having a manual approval gate (`timeoutInMinutes: 120`)
+- **Service Connections:** `sc-azureshop-azure` wraps the Service Principal for secure Azure authentication
+- **Microsoft-Hosted Agents:** `ubuntu-latest` — fresh VM for each pipeline run
+
+**AZ-400 exam topics:**
+- Pipeline YAML structure (stages, jobs, steps)
+- Reusable templates and parameters
+- Variable Groups and secret variables
+- Environment approval gates
+- Service Connections and authentication
+
+**AZ-400 relevance: ⭐⭐⭐ (core topic)**
+
+---
+
+### 2. Azure Active Directory (Azure AD)
+
+**What it is:** Microsoft's identity and access management service. Every authentication in Azure goes through Azure AD.
+
+**How it is used in Phase 5:**
+- The Service Principal `sp-azureshop-terraform` lives in Azure AD
+- Every pipeline run authenticates to Azure by presenting the SP's credentials to Azure AD
+- Azure AD validates the SP and issues a short-lived access token
+- RBAC role assignments (`Contributor` on subscription) are stored in Azure AD
+- Every `az login`, `az acr login`, `az aks get-credentials` call authenticates via Azure AD
+
+**AZ-104 exam topics:** Managing Azure AD users/groups/service principals, RBAC role assignments, conditional access, MFA
+**AZ-400 exam topics:** Service Principals for pipeline authentication, managed identities
+
+**AZ-104 relevance: ⭐⭐⭐ | AZ-400 relevance: ⭐⭐**
+
+---
+
+### 3. Azure Container Registry (ACR)
+
+**What it is:** A private Docker image registry hosted in Azure. Like Docker Hub but private and inside your Azure subscription.
+
+**How it is used in Phase 5:**
+- CI pipelines build Docker images and push them to ACR: `acrazureshopdev.azurecr.io/<service>:<buildId>`
+- Two tags pushed: `:buildId` (immutable, used for deployments and rollbacks) and `:latest` (convenience)
+- Trivy security scanner scans images IN ACR before pushing (blocking gate)
+- `az acr login` via Service Connection authenticates Docker to push
+- CD deploy pipelines pull images from ACR to deploy to AKS
+- In deploy-prod.yaml: image is re-tagged `:stable` after prod deployment passes
+
+**AZ-104 exam topics:** ACR SKUs (Basic/Standard/Premium), geo-replication, content trust, access policies
+**AZ-400 exam topics:** ACR integration with pipelines, image tagging strategy, Trivy security scanning
+
+**AZ-104 relevance: ⭐⭐ | AZ-400 relevance: ⭐⭐⭐**
+
+---
+
+### 4. Azure Kubernetes Service (AKS)
+
+**What it is:** A managed Kubernetes cluster in Azure. AKS handles the Kubernetes control plane — you only manage the worker nodes (or use virtual nodes).
+
+**How it is used in Phase 5:**
+- All 8 AzureShop services are deployed to AKS via Helm charts
+- 3 namespaces: `dev`, `staging`, `prod` (one per environment)
+- `az aks get-credentials` in deploy-template.yaml downloads kubeconfig so `kubectl` and `helm` work
+- `helm upgrade --install` deploys or updates each service
+- Post-deploy smoke test: `kubectl rollout status deployment/<service> -n <namespace>`
+- `REPLICAS` variable controls scale: dev=1, staging=2, prod=3
+
+**AZ-104 exam topics:** AKS node pools, networking (CNI, kubenet), autoscaling, monitoring, RBAC, node upgrades
+**AZ-400 exam topics:** Helm chart deployments, namespace strategy, kubectl from pipelines, rollout verification
+
+**AZ-104 relevance: ⭐⭐⭐ | AZ-400 relevance: ⭐⭐⭐**
+
+---
+
+### 5. Azure Blob Storage
+
+**What it is:** Microsoft's object storage service — stores any type of unstructured data (files, images, logs, backups).
+
+**How it is used in Phase 5:**
+- Terraform remote state storage: Storage Account `myprojectazshoptfstate`, container `tfstate`
+- 3 separate state files: `dev.tfstate`, `staging.tfstate`, `prod.tfstate`
+- **State locking:** Blob Storage uses lease-based locking — when Terraform runs, it locks the blob so two pipeline runs can't modify state simultaneously
+- Every `terraform init` in pipeline connects to this storage account as the backend
+- If a pipeline is killed mid-run, the lock stays — must be force-unlocked with `terraform force-unlock`
+
+**AZ-104 exam topics:** Storage account tiers (Hot/Cool/Archive), redundancy (LRS/GRS/ZRS), access tiers, lifecycle management, shared access signatures (SAS), blob lease operations
+**AZ-400 exam topics:** Terraform remote state in Azure Blob, state locking, backend configuration
+
+**AZ-104 relevance: ⭐⭐⭐ | AZ-400 relevance: ⭐⭐**
+
+---
+
+### 6. Azure Key Vault
+
+**What it is:** A secure, cloud-based secrets manager. Stores passwords, connection strings, certificates, and cryptographic keys — encrypted, audited, and access-controlled.
+
+**How it is used in Phase 5:**
+- `vg-prod` Variable Group in Azure DevOps Library is **linked to Key Vault** — the SQL admin password is fetched directly from Key Vault at pipeline runtime
+- Secret flows: Key Vault → Variable Group → `env:` block in YAML → Terraform → writes back to Key Vault → CSI driver mounts secret inside AKS pods
+- Secret never appears in any YAML file, git repository, or pipeline log
+- In logs it always appears as `***`
+- Purge protection enabled — vault cannot be permanently deleted until 90-day retention expires
+
+**AZ-104 exam topics:** Key Vault access policies vs RBAC, soft delete, purge protection, managed identities, private endpoints, certificate management
+**AZ-400 exam topics:** Linking Variable Groups to Key Vault, secret rotation, CSI driver integration, pipeline secret injection via `env:` block
+
+**AZ-104 relevance: ⭐⭐⭐ | AZ-400 relevance: ⭐⭐⭐**
+
+---
+
+### 7. Azure Resource Manager (ARM)
+
+**What it is:** The underlying management layer for ALL Azure operations. Every action you take in Azure — through the portal, CLI, PowerShell, Terraform, or SDK — is ultimately an HTTP call to the ARM REST API.
+
+**How it is used in Phase 5:**
+- Every `az` CLI command in the pipeline (`az acr login`, `az aks get-credentials`) goes through ARM
+- Every Terraform resource operation (create, update, delete) is an ARM API call
+- The Service Principal must have `Contributor` role at subscription scope so ARM allows all operations
+- ARM enforces RBAC — if the SP doesn't have the right role, ARM returns `403 Forbidden`
+
+**AZ-104 exam topics:** ARM templates, resource providers, management groups, subscription hierarchy, locks (ReadOnly/Delete), policy, RBAC scope (management group → subscription → resource group → resource)
+**AZ-400 exam topics:** ARM as the foundation for all Azure automation — Terraform and Azure CLI both call ARM under the hood
+
+**AZ-104 relevance: ⭐⭐⭐ | AZ-400 relevance: ⭐⭐**
+
+---
+
+### Summary Table — All 7 Services at a Glance
+
+| Service | What It Does in Phase 5 | AZ-104 | AZ-400 |
+|---|---|---|---|
+| Azure DevOps / Pipelines | CI/CD orchestration — 13 pipelines, Variable Groups, Environments, Service Connections | — | ⭐⭐⭐ |
+| Azure Active Directory | Identity — SP authentication, RBAC role assignments | ⭐⭐⭐ | ⭐⭐ |
+| Azure Container Registry | Private Docker registry — build, push, scan, promote images | ⭐⭐ | ⭐⭐⭐ |
+| Azure Kubernetes Service | Deploy target — 8 services, 3 namespaces, Helm charts | ⭐⭐⭐ | ⭐⭐⭐ |
+| Azure Blob Storage | Terraform remote state with lease-based locking | ⭐⭐⭐ | ⭐⭐ |
+| Azure Key Vault | Secrets storage — Variable Group linked to vault, CSI driver | ⭐⭐⭐ | ⭐⭐⭐ |
+| Azure Resource Manager | Management layer — every API call goes through ARM | ⭐⭐⭐ | ⭐⭐ |
+
+---
+
+### Exam Study Tips
+
+**AZ-104 focus (Administrator):** You manage these services directly.
+- Know how to configure access policies on Key Vault
+- Know storage redundancy options (LRS vs GRS vs ZRS)
+- Know how to create service principals and assign RBAC roles
+- Know AKS node pool scaling and upgrade options
+- Know ARM template structure and deployment modes
+
+**AZ-400 focus (DevOps Engineer):** You integrate these services into pipelines.
+- Know how to link Variable Groups to Key Vault
+- Know how to configure Service Connections and Service Principals for pipelines
+- Know Helm chart deployment patterns in Azure Pipelines
+- Know how Terraform uses Blob Storage for remote state and Key Vault for secrets
+- Know how to configure Environment approval gates
+
+---
+
+### Interview Tip
+
+> "Phase 5 uses 7 Azure services. Azure DevOps orchestrates everything. Azure AD authenticates every pipeline action via a Service Principal. ACR stores Docker images — CI pushes them, CD pulls them. AKS is where the 8 services actually run — deployed via Helm in 3 namespaces. Blob Storage holds Terraform remote state with lease-based locking. Key Vault stores the SQL password — linked directly to our Variable Group so the secret never touches YAML or git. ARM is the invisible layer underneath all of it — every az CLI call and every Terraform resource operation is ultimately an ARM API call. The Service Principal needs Contributor on the subscription so ARM allows all those operations."
 
 > **Interview tip:** *"Variable Groups are created manually in Azure DevOps Library — never in git. When a pipeline runs, Azure DevOps reads the YAML, fetches the named Variable Group from Library, and injects all values as environment variables into the pipeline run before any step executes. Secret variables must be explicitly injected into specific steps using the `env:` block and always appear as `***` in logs. Values exist only in memory during the run and are discarded when the pipeline finishes."*
