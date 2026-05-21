@@ -40,6 +40,8 @@ A production-grade e-commerce platform built entirely on Azure, demonstrating en
 | **Container Platform** | AKS (Azure Kubernetes Service) |
 | **Branching Strategy** | GitFlow (feature → dev → main) |
 | **Started** | 2026-05-08 |
+| **Completed** | 2026-05-16 (all 9 phases) |
+| **Status** | All phases complete — infrastructure destroyed 2026-05-16 for cost saving |
 
 **What "3-tier" means:**
 
@@ -922,12 +924,14 @@ ci(scope):    pipeline change
 | Phase 1 | Foundation & Azure Setup | ✅ Done | 2026-05-09 |
 | Phase 2 | Infrastructure as Code (Terraform) | ✅ Done | 2026-05-09 |
 | Phase 3 | Microservices Architecture | ✅ Done | 2026-05-09 |
-| Phase 4 | Containerization (Docker + ACR) | ⬜ Next | — |
-| Phase 5 | Azure Pipelines CI/CD | ⬜ | — |
-| Phase 6 | AKS Kubernetes Deployment | ⬜ | — |
-| Phase 7 | Monitoring & Observability | ⬜ | — |
-| Phase 8 | Security & DevSecOps | ⬜ | — |
-| Phase 9 | Advanced DevOps Patterns | ⬜ | — |
+| Phase 4 | Containerization (Docker + ACR) | ✅ Done | 2026-05-16 |
+| Phase 5 | Azure Pipelines CI/CD | ✅ Done | 2026-05-16 |
+| Phase 6 | AKS Kubernetes Deployment | ✅ Done | 2026-05-16 |
+| Phase 7 | Monitoring & Observability | ✅ Done | 2026-05-16 |
+| Phase 8 | Security & DevSecOps | ✅ Done | 2026-05-16 |
+| Phase 9 | Advanced DevOps Patterns | ✅ Done | 2026-05-16 |
+
+> **Infrastructure note:** All Azure resources were destroyed on 2026-05-16 for cost saving. The Key Vault is in 90-day soft-delete (recoverable). ACR images still exist. Terraform state file `dev.tfstate` is intact. See `project_state.md` memory for recovery steps before next `terraform apply`.
 
 ### Key Azure resources created (Phase 1)
 
@@ -944,4 +948,4 @@ ci(scope):    pipeline change
 
 ---
 
-*Last updated: 2026-05-09 · Phase 3 complete*
+*Last updated: 2026-05-21 · All 9 phases complete*
