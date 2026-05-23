@@ -18,8 +18,8 @@ parameters:
     type: string
     default: dev
   - name: replicas
-    type: number
-    default: 1
+    type: string
+    default: '1'
   - name: helmValuesFile
     type: string
     default: helm/values/dev.yaml
