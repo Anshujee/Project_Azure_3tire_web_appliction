@@ -55,3 +55,9 @@ variable "sql_location" {
   type        = string
   default     = "westus2"
 }
+
+variable "aks_admin_object_id" {
+  description = "Object ID of the Azure AD user granted Azure Kubernetes Service RBAC Cluster Admin — required to run kubectl commands against the cluster"
+  type        = string
+  default     = "df0cac37-4e4b-4338-875d-a01366185bd3"
+}
