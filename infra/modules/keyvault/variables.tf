@@ -82,7 +82,6 @@ variable "redis_primary_access_key" {
 variable "application_insights_connection_strings" {
   description = "Map of service name to Application Insights connection string — one Key Vault secret created per entry"
   type        = map(string)
-  sensitive   = true
   default     = {}
 }
 
