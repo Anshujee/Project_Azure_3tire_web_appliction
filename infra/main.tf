@@ -121,9 +121,8 @@ resource "azurerm_monitor_diagnostic_setting" "aks" {
   enabled_log { category = "cluster-autoscaler" }
 
   # AKS metrics — CPU, memory, pod counts
-  metric {
+  enabled_metric {
     category = "AllMetrics"
-    enabled  = true
   }
 }
 

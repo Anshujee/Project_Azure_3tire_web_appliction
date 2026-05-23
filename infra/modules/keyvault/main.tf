@@ -151,10 +151,12 @@ resource "azurerm_key_vault_secret" "redis_primary_access_key" {
 # for_each creates one secret per service: appinsights-<service>-cs
 # Matches the objectName used in each SecretProviderClass YAML
 resource "azurerm_key_vault_secret" "appinsights_connection_strings" {
-  for_each = var.application_insights_connection_strings
+  # keys() extracts only the service names (non-sensitive); nonsensitive() explicitly
+  # tells Terraform the keys are safe as resource identifiers. Values remain sensitive.
+  for_each = toset(nonsensitive(keys(var.application_insights_connection_strings)))
 
   name         = "appinsights-${each.key}-cs"
-  value        = each.value
+  value        = var.application_insights_connection_strings[each.key]
   key_vault_id = azurerm_key_vault.main.id
   tags         = var.tags
 
