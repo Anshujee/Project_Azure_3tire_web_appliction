@@ -9,6 +9,13 @@ from app.db import get_container, is_connected
 
 router = APIRouter()
 
+MOCK_PRODUCTS = [
+    {"id": "1", "name": "Laptop Pro 15", "description": "High performance laptop", "price": 1299.99, "categoryId": "Electronics", "stock": 10, "imageUrl": ""},
+    {"id": "2", "name": "Wireless Mouse", "description": "Ergonomic wireless mouse", "price": 29.99, "categoryId": "Electronics", "stock": 50, "imageUrl": ""},
+    {"id": "3", "name": "Mechanical Keyboard", "description": "RGB mechanical keyboard", "price": 89.99, "categoryId": "Electronics", "stock": 30, "imageUrl": ""},
+    {"id": "4", "name": "USB-C Hub", "description": "7-in-1 USB-C hub", "price": 49.99, "categoryId": "Electronics", "stock": 25, "imageUrl": ""},
+    {"id": "5", "name": "Monitor 27\"", "description": "4K IPS display", "price": 399.99, "categoryId": "Electronics", "stock": 15, "imageUrl": ""},
+]
 
 # ── Request / Response models ────────────────────────────────────────────────
 class CreateProductRequest(BaseModel):
@@ -36,7 +43,7 @@ class ProductResponse(BaseModel):
 @router.get("/", response_model=list[ProductResponse])
 async def list_products(category: Optional[str] = Query(None)):
     if not is_connected():
-        raise HTTPException(status_code=503, detail="Database not available")
+        return [p for p in MOCK_PRODUCTS if not category or p["categoryId"] == category]
 
     container = get_container()
     try:
@@ -62,7 +69,10 @@ async def list_products(category: Optional[str] = Query(None)):
 @router.get("/{product_id}", response_model=ProductResponse)
 async def get_product(product_id: str, categoryId: Optional[str] = Query(None)):
     if not is_connected():
-        raise HTTPException(status_code=503, detail="Database not available")
+        match = next((p for p in MOCK_PRODUCTS if p["id"] == product_id), None)
+        if not match:
+            raise HTTPException(status_code=404, detail="Product not found")
+        return match
 
     container = get_container()
     try:
