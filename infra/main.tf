@@ -136,6 +136,16 @@ resource "azurerm_role_assignment" "csi_addon_kv_secrets_user" {
   scope                = module.keyvault.key_vault_id
 }
 
+# ── AKS Cluster Admin Role Assignment ────────────────────────────────────────
+# Grants the developer Azure Kubernetes Service RBAC Cluster Admin on the AKS cluster.
+# Required because azure_rbac_enabled = true — Azure AD controls kubectl access.
+# Without this, kubectl commands fail with 403 Forbidden even after az aks get-credentials.
+resource "azurerm_role_assignment" "aks_cluster_admin" {
+  principal_id         = var.aks_admin_object_id
+  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
+  scope                = module.aks.aks_cluster_id
+}
+
 # ── Workload Identity — notification-service ──────────────────────────────────
 # Workload Identity allows pods to authenticate to Azure AD using their
 # Kubernetes ServiceAccount token — no credentials stored anywhere.
