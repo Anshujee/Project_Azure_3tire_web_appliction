@@ -65,15 +65,18 @@ steps:
   # Generates a SARIF file that appears in the Azure DevOps Security tab.
   # --exit-code 0 so this step never fails the pipeline — it is for visibility.
   # The blocking scan in Step 4b enforces the gate.
+  # .trivyignore is mounted so acknowledged CVEs are excluded from the report too.
   - script: |
       mkdir -p $(Build.ArtifactStagingDirectory)/trivy
       docker run --rm \
         -v /var/run/docker.sock:/var/run/docker.sock \
         -v $(Build.ArtifactStagingDirectory)/trivy:/output \
+        -v $(Build.SourcesDirectory)/.trivyignore:/root/.trivyignore \
         aquasec/trivy:latest image \
           --exit-code 0 \
           --severity HIGH,CRITICAL \
           --ignore-unfixed \
+          --ignorefile /root/.trivyignore \
           --format sarif \
           --output /output/trivy-${{ parameters.serviceName }}.sarif \
           --no-progress \
@@ -84,15 +87,18 @@ steps:
   # ── Step 4b: Trivy — blocking gate ─────────────────────────────
   # --exit-code 1 fails the pipeline if any unfixed HIGH/CRITICAL CVE is found.
   # --ignore-unfixed skips CVEs with no available fix — no action possible.
+  # .trivyignore is mounted and passed via --ignorefile so the container reads it.
   # Image is never pushed to ACR if this step fails.
   - script: |
       echo "Security gate: blocking on unfixed HIGH/CRITICAL CVEs..."
       docker run --rm \
         -v /var/run/docker.sock:/var/run/docker.sock \
+        -v $(Build.SourcesDirectory)/.trivyignore:/root/.trivyignore \
         aquasec/trivy:latest image \
           --exit-code 1 \
           --severity HIGH,CRITICAL \
           --ignore-unfixed \
+          --ignorefile /root/.trivyignore \
           --no-progress \
           $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}
     displayName: 'Trivy Security Gate — ${{ parameters.serviceName }}'
