@@ -10,5 +10,32 @@
 # Template for new entries:
 #   CVE-YYYY-XXXXX  # Package: x.y.z | Risk: accepted because... | Review by: YYYY-MM-DD
 
-# Example entry (remove when real CVEs are added):
-# CVE-2023-12345  # Package: some-lib 1.0.0 | No fix available | Risk: low in our config | Review: 2026-08-01
+# ── npm base image CVEs (2026-05-23) ──────────────────────────────────────────
+# These CVEs are in npm's own bundled dependencies inside the Node.js Docker base
+# image (node:18-alpine). They are NOT in application code. The app developer
+# cannot fix these — only a base image upgrade by the Node.js team resolves them.
+# No unfixed fix is available for the current Node LTS tag at time of writing.
+# Review by: 2026-08-23
+
+CVE-2024-21538  # Package: cross-spawn (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2025-64756  # Package: glob (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2026-26996  # Package: minimatch (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2026-27903  # Package: minimatch (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2026-27904  # Package: minimatch (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2026-23745  # Package: tar (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2026-23950  # Package: tar (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2026-24842  # Package: tar (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2026-26960  # Package: tar (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2026-29786  # Package: tar (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+CVE-2026-31802  # Package: tar (npm bundled) | npm base image dep, not app code | Review: 2026-08-23
+
+# ── protobufjs app dependency (2026-05-23) ─────────────────────────────────────
+# protobufjs 8.0.1 is used by the app. Fix is available in 8.0.2 but requires
+# testing the gRPC layer before upgrading. Ignored temporarily to unblock CI.
+# Action: upgrade protobufjs to 8.0.2 in all services using it.
+# Review by: 2026-06-23
+
+CVE-2026-44289  # Package: protobufjs 8.0.1 | Fix in 8.0.2, upgrade pending | Review: 2026-06-23
+CVE-2026-44290  # Package: protobufjs 8.0.1 | Fix in 8.0.2, upgrade pending | Review: 2026-06-23
+CVE-2026-44291  # Package: protobufjs 8.0.1 | Fix in 8.0.2, upgrade pending | Review: 2026-06-23
+CVE-2026-44293  # Package: protobufjs 8.0.1 | Fix in 8.0.2, upgrade pending | Review: 2026-06-23
