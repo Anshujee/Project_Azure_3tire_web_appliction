@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS.
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal.
 
 ---
 
@@ -23,6 +23,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 14. [What is a ConfigMap and a Secret? How are They Implemented in AzureShop?](#q14-what-is-a-configmap-and-a-secret-how-are-they-implemented-in-azureshop)
 15. [What is Azure CNI? How Does it Work and Why Does AzureShop Use it?](#q15-what-is-azure-cni-how-does-it-work-and-why-does-azureshop-use-it)
 16. [What is Azure AD and Azure RBAC? How are They Used in AzureShop?](#q16-what-is-azure-ad-and-azure-rbac-how-are-they-used-in-azureshop)
+17. [What is the Difference Between a Managed Identity and a Service Principal?](#q17-what-is-the-difference-between-a-managed-identity-and-a-service-principal)
 
 ---
 
@@ -1232,3 +1233,182 @@ With: Pipeline uses Azure AD token (short-lived, auto-refreshed) → no stored p
 3. **Difference between Azure RBAC for AKS vs Kubernetes RBAC?** — Azure RBAC uses Azure AD identities and Azure role assignments. Kubernetes RBAC uses cluster-internal users managed via YAML. Azure RBAC is easier at scale — add to AD group = instant cluster access.
 4. **What is a Managed Identity and why is it better than a Service Principal password?** — Managed Identity has no credentials to manage. Azure handles token issuance and rotation. Tokens are short-lived (1 hour). No password in code, configs, or pipelines.
 5. **Why does CSI addon get Secrets User and not Secrets Officer?** — Least privilege. CSI driver only needs to READ secrets. Secrets Officer also allows writing — unnecessary. If compromised, attacker can only read, not modify secrets.
+
+---
+
+## Q17. What is the Difference Between a Managed Identity and a Service Principal?
+
+### WHY This Matters
+
+In AzureShop, both a Managed Identity and a Service Principal are used. Interviewers often ask you to compare them because they look similar on the surface — both authenticate to Azure, both get RBAC roles — but the key differences are critical for production security.
+
+### The Analogy — Employee Badge vs Contractor Badge
+
+Think of accessing a secure office building:
+
+```
+Service Principal = Contractor Badge
+  - You create it yourself
+  - You set the expiry date (can be years)
+  - You are responsible for keeping it safe
+  - If it's stolen, attacker uses it until you notice and revoke it
+  - You must remember to renew it before it expires
+
+Managed Identity = Permanent Employee Badge
+  - The building (Azure) issues it automatically
+  - No expiry date you manage — Azure handles token refresh
+  - Badge only works on the specific floor/building it was issued for
+  - Stored inside the system — you can never "take it home" (no exportable secret)
+  - Cannot be stolen because there is nothing to steal
+```
+
+### What is a Service Principal?
+
+A Service Principal is an identity for applications, scripts, and automation. You create it manually in Azure AD and receive a **Client ID + Client Secret** (or certificate).
+
+```bash
+# You create it
+az ad sp create-for-rbac --name sp-azureshop-terraform
+
+# You get back
+{
+  "appId": "0eaa884c-...",     ← Client ID (public — who am I)
+  "password": "abc123xyz...",  ← Client Secret (private — prove it)
+  "tenant": "4c135936-..."
+}
+```
+
+The Client Secret is a **password**. It has an expiry date (up to 2 years). You must store it somewhere (Key Vault, pipeline variable group), rotate it before it expires, and update everywhere it is stored.
+
+### What is a Managed Identity?
+
+A Managed Identity is also a Service Principal under the hood — but Azure creates and manages it automatically. There is **no Client Secret**. Azure handles everything.
+
+```
+You enable Managed Identity on an Azure resource (VM, AKS, App Service)
+  ↓
+Azure creates a Service Principal in Azure AD on your behalf
+  ↓
+Azure stores and rotates the credential internally — you never see it
+  ↓
+Resource authenticates by asking Azure's Instance Metadata Service (IMDS):
+  "Give me a token for this identity"
+  ↓
+Azure returns a short-lived token (1 hour) — no password needed
+```
+
+### System-Assigned vs User-Assigned Managed Identity
+
+There are two types of Managed Identity:
+
+**System-Assigned:**
+- Created and tied to one specific Azure resource
+- When the resource is deleted, the identity is deleted automatically
+- One resource → one identity
+- Example: turning on identity for an App Service
+
+**User-Assigned:**
+- Created as a standalone Azure resource
+- Can be attached to MULTIPLE resources
+- Survives resource deletion — you delete it separately
+- Example: `id-notification-service-dev` in AzureShop
+
+```hcl
+# System-Assigned — just enable it on the resource
+resource "azurerm_linux_virtual_machine" "example" {
+  identity {
+    type = "SystemAssigned"
+  }
+}
+
+# User-Assigned — create it first, then attach it
+resource "azurerm_user_assigned_identity" "notification_service" {
+  name                = "id-notification-service-dev"
+  resource_group_name = var.resource_group_name
+  location            = var.location
+}
+```
+
+### Point-to-Point Comparison
+
+| | Service Principal | Managed Identity |
+|---|---|---|
+| **Who creates it** | You (manual `az ad sp create`) | Azure (automatic) |
+| **Credentials** | Client ID + Client Secret (or cert) | No secret — Azure manages it |
+| **Credential storage** | You must store in Key Vault / pipeline vars | Nothing to store |
+| **Rotation** | Manual — you must rotate before expiry | Automatic — Azure handles it |
+| **Expiry** | 1–2 years (you set it) | No expiry — token is short-lived (1h) |
+| **What can use it** | Any app anywhere — code, scripts, pipelines | Only Azure-hosted resources (VMs, AKS, App Service) |
+| **Risk if leaked** | Long-lived secret — valid until rotated | Nothing to leak — no exportable credential |
+| **Cost** | Free | Free |
+| **Complexity** | More setup — store + rotate + update | Less setup — enable and assign role |
+| **Use for** | External tools (Terraform, GitHub Actions), CI/CD pipelines | Azure-hosted services talking to other Azure services |
+
+### When to Use Which
+
+**Use Service Principal when:**
+- The caller is NOT hosted in Azure (your local machine running Terraform, GitHub Actions, external scripts)
+- You need one identity used across multiple unrelated services or subscriptions
+- The tool doesn't support Managed Identity
+
+**Use Managed Identity when:**
+- The caller IS hosted in Azure (VM, AKS pod, App Service, Function App)
+- Always prefer it over Service Principal for Azure-to-Azure communication
+- You want to eliminate credential management entirely
+
+> Rule of thumb: If the thing that needs to authenticate lives in Azure, use Managed Identity. If it lives outside Azure, use Service Principal.
+
+### How AzureShop Uses Both
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                         AzureShop Identity Map                    │
+├──────────────────────────┬───────────────────────────────────────┤
+│ Identity                 │ Type                  │ Used For       │
+├──────────────────────────┼───────────────────────┼───────────────┤
+│ sp-azureshop-terraform   │ Service Principal     │ Terraform runs │
+│                          │ (external — your Mac) │ locally + ADO  │
+├──────────────────────────┼───────────────────────┼───────────────┤
+│ ADO Pipeline identity    │ Service Principal     │ Azure DevOps   │
+│ (sc-azureshop-azure)     │ (ADO is external)     │ CI/CD          │
+├──────────────────────────┼───────────────────────┼───────────────┤
+│ AKS kubelet identity     │ Managed Identity      │ Pull ACR       │
+│                          │ (system-assigned)     │ images         │
+├──────────────────────────┼───────────────────────┼───────────────┤
+│ CSI addon identity       │ Managed Identity      │ Fetch Key      │
+│                          │ (system-assigned)     │ Vault secrets  │
+├──────────────────────────┼───────────────────────┼───────────────┤
+│ id-notification-         │ Managed Identity      │ Receive msgs   │
+│ service-dev              │ (user-assigned)       │ from Service   │
+│                          │                       │ Bus (Workload  │
+│                          │                       │ Identity)      │
+└──────────────────────────┴───────────────────────┴───────────────┘
+```
+
+**Why user-assigned for notification-service (not system-assigned)?**
+A system-assigned identity is tied to the AKS cluster resource. If the cluster is recreated (which happens during Terraform destroy/apply), the identity changes — and the federated credential binding for Workload Identity breaks. A user-assigned identity survives cluster recreation — you just re-attach it.
+
+### The Key Vault Access Chain (How It All Connects)
+
+```
+Terraform (local Mac)
+  → uses Service Principal sp-azureshop-terraform
+  → has Key Vault Secrets Officer role
+  → writes secrets to Key Vault
+
+AKS pod (user-service)
+  → CSI Driver (inside AKS cluster, hosted in Azure)
+  → uses CSI addon Managed Identity
+  → has Key Vault Secrets User role
+  → reads secrets from Key Vault → injects as env vars
+```
+
+Same Key Vault, two different identities, two different roles — one writes (Terraform SP), one reads (Managed Identity). Least privilege per identity.
+
+### Interview Prep
+
+1. **What is the difference between a Managed Identity and a Service Principal?** — Both are Azure AD identities used by applications. Service Principal requires you to manage credentials (Client ID + Secret). Managed Identity is created and managed by Azure — no credentials to store or rotate.
+2. **When would you use a Service Principal instead of a Managed Identity?** — When the caller is not hosted in Azure. Local scripts, GitHub Actions, Terraform running on your laptop — these cannot use Managed Identity because they are not Azure resources.
+3. **What is the difference between system-assigned and user-assigned Managed Identity?** — System-assigned is tied to one resource and deleted with it. User-assigned is a standalone resource that can be attached to multiple Azure resources and persists independently.
+4. **Why does AzureShop use a user-assigned (not system-assigned) identity for notification-service?** — Because the federated credential for Workload Identity is bound to this identity's object ID. If the AKS cluster is destroyed and recreated, a system-assigned identity would change. The user-assigned identity survives cluster recreation.
+5. **Is a Managed Identity actually a Service Principal?** — Yes. Internally, Azure creates a Service Principal for a Managed Identity. The difference is that Azure manages the credentials — you never see or store them. From the Azure RBAC perspective, assigning a role works the same way.
