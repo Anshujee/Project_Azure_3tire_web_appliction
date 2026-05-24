@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal.
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure.
 
 ---
 
@@ -24,6 +24,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 15. [What is Azure CNI? How Does it Work and Why Does AzureShop Use it?](#q15-what-is-azure-cni-how-does-it-work-and-why-does-azureshop-use-it)
 16. [What is Azure AD and Azure RBAC? How are They Used in AzureShop?](#q16-what-is-azure-ad-and-azure-rbac-how-are-they-used-in-azureshop)
 17. [What is the Difference Between a Managed Identity and a Service Principal?](#q17-what-is-the-difference-between-a-managed-identity-and-a-service-principal)
+18. [What is the Purpose of Every Folder and File Inside the k8s/ Directory?](#q18-what-is-the-purpose-of-every-folder-and-file-inside-the-k8s-directory)
 
 ---
 
@@ -1412,3 +1413,391 @@ Same Key Vault, two different identities, two different roles — one writes (Te
 3. **What is the difference between system-assigned and user-assigned Managed Identity?** — System-assigned is tied to one resource and deleted with it. User-assigned is a standalone resource that can be attached to multiple Azure resources and persists independently.
 4. **Why does AzureShop use a user-assigned (not system-assigned) identity for notification-service?** — Because the federated credential for Workload Identity is bound to this identity's object ID. If the AKS cluster is destroyed and recreated, a system-assigned identity would change. The user-assigned identity survives cluster recreation.
 5. **Is a Managed Identity actually a Service Principal?** — Yes. Internally, Azure creates a Service Principal for a Managed Identity. The difference is that Azure manages the credentials — you never see or store them. From the Azure RBAC perspective, assigning a role works the same way.
+
+---
+
+## Q18. What is the Purpose of Every Folder and File Inside the k8s/ Directory?
+
+### The Big Picture First
+
+Think of the `k8s/` folder as the **operations manual for the Kubernetes cluster**. The `helm/charts/` folder tells Kubernetes *how to run each service*. The `k8s/` folder tells Kubernetes *how to set up the environment those services live in*.
+
+```
+k8s/
+├── namespaces/              ← Create the rooms in the building
+├── secret-provider-classes/ ← Connect Key Vault to each pod
+├── ingress/                 ← The front door routing rules
+├── ingress-nginx-values.yaml ← Configure the front door itself
+├── alert-rules/             ← Set up alarms
+├── grafana-dashboards/      ← Set up monitoring screens
+└── gitops/                  ← Automate deployments via Git
+```
+
+---
+
+### namespaces/ — Creating the Rooms
+
+#### `namespaces/dev.yaml`
+
+Creates the `dev` namespace — the room where all 8 AzureShop services live.
+
+The important part is the labels. The `pod-security.kubernetes.io/enforce: restricted` labels activate **Pod Security Admission** — a built-in Kubernetes security guard at the namespace door.
+
+```
+Pod tries to deploy in dev namespace
+       ↓
+Pod Security Admission checks: does this pod follow "restricted" rules?
+Rules: runAsNonRoot? drop ALL capabilities? no privilege escalation?
+       ↓
+Fails any rule → Kubernetes REJECTS the pod — it never starts
+```
+
+Three modes run simultaneously:
+- `enforce` → reject the pod if it violates
+- `audit` → log the violation
+- `warn` → show a warning to the person running kubectl
+
+All 8 AzureShop services satisfy `restricted` because Phase 8 hardened all Helm charts.
+
+#### `namespaces/dev-resource-quota.yaml`
+
+Two resources in one file — **ResourceQuota** and **LimitRange**.
+
+**ResourceQuota** is a hard ceiling on the entire `dev` namespace:
+
+```
+Total CPU requests across all pods: max 8 cores
+Total CPU limits across all pods:   max 16 cores
+Total memory requests:              max 8 GiB
+Total memory limits:                max 16 GiB
+Max 50 pods, 20 services, 50 secrets, 30 ConfigMaps
+```
+
+Analogy: it's like a building's total electricity budget. Individual tenants (pods) can use as much as they want — but the whole building can never exceed the meter limit.
+
+**LimitRange** applies *per container*:
+
+```
+Container sets NO requests/limits → LimitRange injects defaults:
+    CPU request: 100m, CPU limit: 500m
+    Memory request: 128Mi, Memory limit: 512Mi
+
+No single container can exceed:  CPU: 2 cores, Memory: 2 GiB
+No container can request less than: CPU: 10m, Memory: 16Mi
+```
+
+**Why both are needed together:** ResourceQuota only counts resources that have requests/limits set. If a container sets none, it bypasses the quota entirely. LimitRange fills in defaults, so every container gets counted.
+
+#### `namespaces/monitoring.yaml`, `staging.yaml`, `prod.yaml`
+
+Simple namespace definitions. No security labels on `monitoring` because kube-prometheus-stack's pods (Grafana, Prometheus) need elevated permissions and would fail the `restricted` standard. `staging` and `prod` namespaces are created but not actively used (infra is destroyed).
+
+---
+
+### secret-provider-classes/ — The Key Vault Bridge
+
+Five files — one for each service that needs secrets from Key Vault:
+
+```
+user-service.yaml      → needs SQL + App Insights secrets
+product-service.yaml   → needs Cosmos DB + App Insights secrets
+cart-service.yaml      → needs Redis + App Insights secrets
+order-service.yaml     → needs Service Bus + App Insights secrets
+payment-service.yaml   → needs Service Bus + App Insights secrets
+```
+
+notification-service uses Workload Identity directly — no SecretProviderClass needed. api-gateway and frontend have no secrets.
+
+**How a SecretProviderClass works** (user-service as example):
+
+```yaml
+kind: SecretProviderClass
+name: user-service-secrets
+spec:
+  provider: azure
+  parameters:
+    userAssignedIdentityID: "d755c00c-..."   # CSI addon identity
+    keyvaultName: "kv-azureshop-6a6c-dev"
+    objects:
+      - objectName: sql-server-fqdn          # fetch from Key Vault
+      - objectName: sql-admin-username
+      - objectName: sql-admin-password
+      - objectName: appinsights-user-service-cs
+  secretObjects:
+    - secretName: user-service-secrets       # create this K8s Secret
+      data:
+        - objectName: sql-server-fqdn
+          key: SQL_SERVER                    # pod reads this env var
+```
+
+The flow:
+
+```
+Pod starts
+  ↓
+CSI Driver authenticates to Key Vault using the addon Managed Identity
+  ↓
+CSI Driver fetches sql-server-fqdn, sql-admin-password, etc.
+  ↓
+CSI Driver creates a Kubernetes Secret called "user-service-secrets"
+  ↓
+Pod reads env var SQL_SERVER from that Secret
+  ↓
+Pod never talked to Key Vault directly — CSI Driver did it all
+```
+
+**Why 5 separate files instead of 1 big one?** Least privilege. user-service only gets SQL secrets. cart-service only gets Redis secrets. If user-service is compromised, the attacker only gets SQL credentials — not Redis or Cosmos keys.
+
+---
+
+### ingress/ — The Front Door
+
+#### `ingress/dev-ingress.yaml`
+
+The routing rule that tells the NGINX Ingress Controller how to send external traffic to the right service.
+
+```yaml
+paths:
+  - path: /api/   → backend: api-gateway:8080
+  - path: /       → backend: frontend:3000
+```
+
+The full traffic flow:
+
+```
+Browser: http://134.33.223.224/products
+    ↓  Azure Load Balancer
+    ↓  NGINX Ingress Controller
+    ↓  path /products — does NOT start with /api/
+    ↓  → frontend:3000 (Next.js handles the page)
+
+Browser: http://134.33.223.224/api/users/me
+    ↓  NGINX Ingress Controller
+    ↓  path starts with /api/ → api-gateway:8080
+    ↓  api-gateway's nginx.conf routes to user-service:3001
+```
+
+Think of this as the building directory at the front entrance.
+
+#### `ingress/canary-example.yaml`
+
+A **pattern/example file** — not applied to the cluster by default. Shows how to do a canary deployment for `user-service` using two Ingress objects for the same path:
+
+```
+user-service-stable Ingress  →  user-service (old version)  ← 80% traffic
+user-service-canary Ingress  →  user-service-canary (new)   ← 20% traffic
+```
+
+The annotation `nginx.ingress.kubernetes.io/canary-weight: "20"` splits traffic automatically — no code change, no DNS change, no load balancer reconfiguration needed.
+
+To roll back instantly: delete the canary Ingress. 100% traffic immediately returns to stable.
+
+---
+
+### `ingress-nginx-values.yaml` — Configuring the Front Door Itself
+
+The Helm values file used to **install the NGINX Ingress Controller** itself. Used once during cluster setup:
+
+```bash
+helm install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx \
+  --values k8s/ingress-nginx-values.yaml
+```
+
+Key settings:
+
+```yaml
+replicaCount: 2           # 2 NGINX pods — no single point of failure
+
+podAntiAffinity:          # spread the 2 pods across different nodes
+  topologyKey: kubernetes.io/hostname
+
+resources:
+  requests: cpu: 100m, memory: 90Mi
+  limits:   cpu: 500m, memory: 256Mi
+
+metrics:
+  enabled: true           # expose /metrics for Prometheus scraping
+```
+
+**Why `podAntiAffinity`?** If both NGINX pods landed on the same node and that node crashed, the front door goes down. Anti-affinity tells the scheduler: prefer different nodes for these two pods.
+
+---
+
+### alert-rules/azureshop-alerts.yaml
+
+Defines **10 Prometheus alerts** in 3 groups using the `PrometheusRule` custom resource.
+
+**How it gets loaded:** The Prometheus Operator watches for any `PrometheusRule` with label `release: kube-prometheus-stack`. When it finds one, it loads the rules into Prometheus automatically — no restart needed.
+
+**Group 1 — HTTP alerts** (based on your app's own metrics):
+
+| Alert | Condition | Severity |
+|---|---|---|
+| HighErrorRate | Service returns 5xx on >5% of requests for 5 min | Critical |
+| HighP95Latency | P95 response time >1s for 5 min | Warning |
+| ServiceReceivingNoTraffic | Zero requests for 10 min | Warning |
+
+**Group 2 — Availability alerts** (based on kube-state-metrics):
+
+| Alert | Condition | Severity |
+|---|---|---|
+| PodCrashLoopBackOff | Pod crash-looping for 5 min | Critical |
+| PodNotRunning | Pod stuck in Pending/Failed for 15 min | Warning |
+| DeploymentUnavailable | Zero available replicas for 2 min | Critical |
+| PodUnschedulable | Can't be scheduled for 10 min | Warning |
+
+**Group 3 — Capacity alerts**:
+
+| Alert | Condition | Severity |
+|---|---|---|
+| HPAAtMaxReplicas | HPA stuck at max replicas for 10 min | Warning |
+| HighMemoryUsage | Container at >85% memory limit for 5 min | Warning |
+| HighCPUThrottling | Container CPU-throttled >25% of the time for 10 min | Warning |
+
+---
+
+### grafana-dashboards/ — The Monitoring Screens
+
+#### `grafana-dashboards/azureshop-services.json`
+
+The raw Grafana dashboard definition in JSON. Contains 6 panels: Request Rate, Error Rate, P95 Latency, Running Pods, CPU Usage, Memory Usage. You edit in Grafana UI, export the JSON, and save it here so the dashboard is version-controlled.
+
+#### `grafana-dashboards/configmap.yaml`
+
+The mechanism that loads the JSON into Grafana automatically:
+
+```yaml
+kind: ConfigMap
+namespace: monitoring
+labels:
+  grafana_dashboard: "1"       ← this label is the trigger
+data:
+  azureshop-services.json: |   ← the full JSON embedded here
+    { ... }
+```
+
+Grafana's sidecar container watches all ConfigMaps with label `grafana_dashboard: "1"`. When it finds one, it loads the JSON as a dashboard within ~30 seconds — no Grafana restart needed.
+
+JSON file = the design. ConfigMap = the delivery mechanism. Label = the trigger that activates the sidecar.
+
+---
+
+### gitops/ — Automatic Deployments from Git (Phase 9)
+
+#### What is GitOps?
+
+```
+Normal pipeline:  You push → pipeline runs → pipeline calls helm upgrade → cluster updates
+GitOps:           You push → Flux (inside cluster) detects change in Git → Flux calls helm upgrade
+```
+
+The cluster **pulls** from Git instead of a pipeline **pushing** to the cluster.
+
+#### `gitops/sources/git-repository.yaml`
+
+```yaml
+kind: GitRepository
+spec:
+  url: https://dev.azure.com/azureshop-org/AzureShop/_git/AzureShop
+  ref:
+    branch: dev
+  interval: 1m
+```
+
+Tells Flux: "Check this Git repo every 1 minute. If anything changed on `dev`, fetch it." This is the source definition — where Flux looks for the truth.
+
+#### `gitops/releases/*.yaml` — One HelmRelease Per Service
+
+Each file (e.g. `user-service.yaml`) tells Flux:
+
+```yaml
+kind: HelmRelease
+spec:
+  interval: 5m                   # check every 5 minutes
+  chart:
+    spec:
+      chart: ./helm/charts/user-service   # path in the Git repo
+  upgrade:
+    remediation:
+      remediateLastFailure: true  # auto-rollback on failure
+```
+
+What happens when you push a new image tag:
+
+```
+You push to dev branch
+  ↓ (within 1 minute)
+Flux detects change in git-repository
+  ↓
+Flux reads HelmRelease for user-service
+  ↓
+Flux runs: helm upgrade user-service ./helm/charts/user-service
+  ↓
+New pods deploy with rolling update
+  ↓
+If it fails → Flux auto-rolls back
+```
+
+#### `gitops/releases/kustomization.yaml`
+
+```yaml
+kind: Kustomization
+resources:
+  - user-service.yaml
+  - cart-service.yaml
+  - ... (all 8)
+```
+
+The index that tells Flux "these are all the HelmRelease files I manage." Apply this one file and all 8 HelmReleases get picked up. Without this, you'd have to apply each file individually.
+
+---
+
+### Full Summary Map
+
+```
+k8s/
+│
+├── namespaces/
+│   ├── dev.yaml                  → Create dev namespace + enforce Pod Security (restricted)
+│   ├── dev-resource-quota.yaml   → Cap total CPU/memory + inject defaults per container
+│   ├── monitoring.yaml           → Create monitoring namespace (no security labels)
+│   ├── staging.yaml              → Create staging namespace (unused)
+│   └── prod.yaml                 → Create prod namespace (unused)
+│
+├── secret-provider-classes/      → Bridge between Key Vault and each pod's env vars
+│   ├── user-service.yaml         → Fetches SQL + AppInsights secrets
+│   ├── cart-service.yaml         → Fetches Redis + AppInsights secrets
+│   ├── order-service.yaml        → Fetches ServiceBus + AppInsights secrets
+│   ├── payment-service.yaml      → Fetches ServiceBus + AppInsights secrets
+│   └── product-service.yaml      → Fetches Cosmos + AppInsights secrets
+│
+├── ingress/
+│   ├── dev-ingress.yaml          → Route /api/* → api-gateway, /* → frontend
+│   └── canary-example.yaml       → Pattern: 80/20 traffic split for safe deployments
+│
+├── ingress-nginx-values.yaml     → Install config for NGINX Ingress Controller itself
+│
+├── alert-rules/
+│   └── azureshop-alerts.yaml     → 10 Prometheus alerts (HTTP, availability, capacity)
+│
+├── grafana-dashboards/
+│   ├── azureshop-services.json   → Dashboard definition (6 panels)
+│   └── configmap.yaml            → Auto-loads JSON into Grafana via sidecar label trick
+│
+└── gitops/
+    ├── sources/
+    │   └── git-repository.yaml   → Tell Flux: watch this Git repo, branch dev, every 1m
+    └── releases/
+        ├── kustomization.yaml    → Index of all 8 HelmReleases
+        └── *.yaml (×8)          → One HelmRelease per service — Flux applies Helm for you
+```
+
+### Interview Prep
+
+1. **What is the difference between `helm/charts/` and `k8s/` in AzureShop?** — `helm/charts/` defines how each service runs (Deployment, Service, HPA, etc.). `k8s/` sets up the environment — namespaces, security policies, ingress routing, secret bridges, alerts, dashboards, and GitOps automation.
+2. **What does a SecretProviderClass do?** — It bridges Azure Key Vault and a Kubernetes pod. It tells the CSI Driver which secrets to fetch from Key Vault, and creates a Kubernetes Secret from those values. The pod reads that Secret as env vars — never touching Key Vault directly.
+3. **What is the difference between ResourceQuota and LimitRange?** — ResourceQuota caps the total resource consumption of an entire namespace. LimitRange sets defaults and caps per individual container. Both are needed together — LimitRange ensures containers have requests set so ResourceQuota can count them.
+4. **Why does NGINX Ingress have `podAntiAffinity`?** — To prevent both NGINX replicas from landing on the same node. If that node crashes, the front door survives because the second replica is on a different node.
+5. **What is GitOps and how does Flux implement it in AzureShop?** — GitOps means Git is the single source of truth for cluster state. Flux runs inside the cluster, polls the Git repo every 1 minute, and applies any changes via Helm automatically. The cluster pulls changes rather than a pipeline pushing them.
+6. **How does the Grafana dashboard get loaded without restarting Grafana?** — A ConfigMap in the `monitoring` namespace is labeled `grafana_dashboard: "1"`. Grafana's sidecar container watches for ConfigMaps with this label and loads the embedded JSON as a dashboard within 30 seconds.
