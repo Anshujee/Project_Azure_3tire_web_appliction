@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure.
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal.
 
 ---
 
@@ -25,6 +25,8 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 16. [What is Azure AD and Azure RBAC? How are They Used in AzureShop?](#q16-what-is-azure-ad-and-azure-rbac-how-are-they-used-in-azureshop)
 17. [What is the Difference Between a Managed Identity and a Service Principal?](#q17-what-is-the-difference-between-a-managed-identity-and-a-service-principal)
 18. [What is the Purpose of Every Folder and File Inside the k8s/ Directory?](#q18-what-is-the-purpose-of-every-folder-and-file-inside-the-k8s-directory)
+19. [What are Service Endpoints? (Azure VNet Service Endpoints vs Kubernetes Endpoints)](#q19-what-are-service-endpoints-azure-vnet-service-endpoints-vs-kubernetes-endpoints)
+20. [What is the Difference Between a Service Endpoint and a Service Principal?](#q20-what-is-the-difference-between-a-service-endpoint-and-a-service-principal)
 
 ---
 
@@ -1801,3 +1803,228 @@ k8s/
 4. **Why does NGINX Ingress have `podAntiAffinity`?** — To prevent both NGINX replicas from landing on the same node. If that node crashes, the front door survives because the second replica is on a different node.
 5. **What is GitOps and how does Flux implement it in AzureShop?** — GitOps means Git is the single source of truth for cluster state. Flux runs inside the cluster, polls the Git repo every 1 minute, and applies any changes via Helm automatically. The cluster pulls changes rather than a pipeline pushing them.
 6. **How does the Grafana dashboard get loaded without restarting Grafana?** — A ConfigMap in the `monitoring` namespace is labeled `grafana_dashboard: "1"`. Grafana's sidecar container watches for ConfigMaps with this label and loads the embedded JSON as a dashboard within 30 seconds.
+
+---
+
+## Q19. What are Service Endpoints? (Azure VNet Service Endpoints vs Kubernetes Endpoints)
+
+### There Are Two Types — Don't Confuse Them
+
+```
+1. Azure VNet Service Endpoints  →  Azure networking feature
+2. Kubernetes Endpoints          →  Kubernetes object inside the cluster
+```
+
+---
+
+### Azure VNet Service Endpoints
+
+#### WHY They Exist
+
+By default, Azure PaaS services (SQL, Redis, Cosmos DB, Storage) are public internet resources — they have public IPs and are reachable from anywhere in the world. The only protection is username/password.
+
+```
+Without Service Endpoints:
+  Anyone on the internet → tries SQL → only password stops them
+```
+
+You want SQL to only accept connections from **your VNet** — nothing else.
+
+#### What a Service Endpoint Does
+
+A Service Endpoint creates a **direct, private route** from your VNet subnet to an Azure PaaS service — and lets you lock that service down to only accept traffic from that subnet.
+
+```
+Without Service Endpoint:
+  AKS pod → public internet → Azure SQL (public IP)
+
+With Service Endpoint:
+  AKS pod → stays inside Azure backbone → Azure SQL (never touches internet)
+```
+
+The analogy: your office building (VNet) gets a **private corridor** directly to the post office (SQL). Mail can only be delivered through that corridor. The public entrance is locked.
+
+#### How It Works in AzureShop — Terraform
+
+In `infra/modules/networking/main.tf`, the AKS subnet has service endpoints declared:
+
+```hcl
+subnet "aks" {
+  service_endpoints = [
+    "Microsoft.Sql",
+    "Microsoft.AzureCosmosDB",
+    "Microsoft.KeyVault"
+  ]
+}
+```
+
+Then on the SQL Server, a firewall rule locks it to only that subnet:
+
+```hcl
+virtual_network_rule "aks" {
+  subnet_id = module.networking.aks_subnet_id
+}
+```
+
+Result: only traffic from the AKS subnet reaches SQL. Everything else — internet, other VNets — is rejected at the network level.
+
+#### Azure Service Endpoints vs Private Endpoints
+
+| | Service Endpoint | Private Endpoint |
+|---|---|---|
+| How it works | Private route from subnet to public service IP | Gives the PaaS service a private IP inside your VNet |
+| Service still has public IP | YES | NO — fully private |
+| DNS change needed | No | Yes — private DNS zone |
+| Cost | Free | Paid (per hour + data) |
+| Security level | Good — subnet-level lock | Better — no public IP at all |
+| Used in AzureShop | Yes (SQL, Cosmos, Key Vault) | No (cost saving on dev) |
+
+In production you'd use Private Endpoints. AzureShop uses Service Endpoints on dev because they're free and sufficient for learning.
+
+---
+
+### Kubernetes Endpoints (the K8s Object)
+
+#### WHY They Exist
+
+When you create a Kubernetes Service, it gets a stable ClusterIP. But the Service needs to know **which pod IPs to forward traffic to**. That list is stored in an **Endpoints** object.
+
+Every Service automatically gets a matching Endpoints object with the same name, containing the current list of healthy pod IPs.
+
+```bash
+kubectl get endpoints user-service -n dev
+
+NAME           ENDPOINTS                         AGE
+user-service   10.1.1.5:3001,10.1.1.12:3001     2d
+```
+
+```
+Service: user-service (ClusterIP: 10.0.12.5)
+    ↓
+Endpoints: user-service
+    ├── 10.1.1.5:3001   ← pod 1 (healthy, passing readiness probe)
+    └── 10.1.1.12:3001  ← pod 2 (healthy, passing readiness probe)
+```
+
+#### How It Updates Automatically
+
+```
+Pod fails readiness probe
+  ↓
+Endpoints controller removes that pod IP from the Endpoints list
+  ↓
+kube-proxy updates iptables rules on all nodes
+  ↓
+Traffic stops going to that pod immediately
+
+Pod recovers, passes readiness probe
+  ↓
+Endpoints controller adds the pod IP back
+  ↓
+Traffic resumes to that pod
+```
+
+This is why readiness probes matter — they directly control which pod IPs are in the Endpoints list.
+
+---
+
+### How Both Connect in AzureShop
+
+```
+Browser
+  ↓
+NGINX Ingress → api-gateway Service
+  ↓
+Kubernetes Endpoints: [api-gateway pod 1 IP, pod 2 IP]   ← K8s Endpoints
+  ↓
+api-gateway pod → user-service Service
+  ↓
+Kubernetes Endpoints: [user-service pod 1 IP, pod 2 IP]   ← K8s Endpoints
+  ↓
+user-service pod → Azure SQL
+  ↓
+Azure VNet Service Endpoint: private route from AKS subnet → SQL   ← Azure Service Endpoint
+  ↓
+Azure SQL (only accepts connections from aks_subnet — everything else blocked)
+```
+
+### Interview Prep
+
+1. **What is an Azure VNet Service Endpoint?** — A private network route from a VNet subnet directly to an Azure PaaS service (SQL, Cosmos, Key Vault), combined with a firewall rule that blocks all other traffic. Traffic stays on the Azure backbone — never touches the public internet.
+2. **What is a Kubernetes Endpoints object?** — An auto-managed list of healthy pod IPs behind a Kubernetes Service. Updated in real time based on readiness probe results. kube-proxy uses it to set up iptables routing on every node.
+3. **What is the difference between Azure Service Endpoints and Private Endpoints?** — Service Endpoints give a private route to a PaaS service that still has a public IP (free). Private Endpoints give the PaaS service a real private IP inside your VNet with no public IP (paid). Private Endpoints are more secure.
+4. **Why does AzureShop use Service Endpoints and not Private Endpoints?** — Cost. Service Endpoints are free and sufficient for a dev environment. Production deployments would use Private Endpoints to fully remove public IP exposure.
+5. **How does a readiness probe affect Kubernetes Endpoints?** — When a pod fails its readiness probe, the Endpoints controller removes that pod's IP from the Endpoints list. No new traffic is routed to it. When it recovers, the IP is added back. This is the mechanism behind zero-downtime traffic management.
+
+---
+
+## Q20. What is the Difference Between a Service Endpoint and a Service Principal?
+
+### The One-Line Answer
+
+```
+Service Endpoint   =  a NETWORKING concept   (where traffic is allowed to go)
+Service Principal  =  an IDENTITY concept    (who is allowed to authenticate)
+```
+
+These two have nothing to do with each other — they just both happen to have the word "Service" in their name.
+
+### The Analogy — A Bank Vault
+
+Think of Azure SQL as a bank vault.
+
+**Service Endpoint** = the **private road** the bank built directly to your office. Only your office can use that road. No one from the street can reach the vault through it. This is a network-level control.
+
+**Service Principal** = the **ID card** your employee carries. When they arrive at the vault door, the guard checks: "Who are you? Are you authorised?" This is an identity-level control.
+
+### You Need Both — They Operate at Different Layers
+
+```
+AKS pod wants to query Azure SQL
+
+Layer 1 — Network (Service Endpoint):
+  "Is this traffic coming from the aks_subnet?" YES → allow through
+  If NO → blocked at network level, request never reaches SQL
+
+Layer 2 — Identity (Service Principal / credentials):
+  "Is this the right username and password?" YES → allow query
+  If NO → authentication failure
+```
+
+A Service Endpoint with no credentials → network reaches SQL but login fails.
+Credentials with no Service Endpoint → network blocked before login is even attempted.
+
+### Side-by-Side Comparison
+
+| | Service Endpoint | Service Principal |
+|---|---|---|
+| **What it is** | A private network route from your VNet to an Azure PaaS service | An identity (like a user account) for an application or script |
+| **What it controls** | WHERE traffic can come from — network level | WHO is allowed to authenticate — identity level |
+| **Lives in** | Azure Networking / VNet subnet | Azure Active Directory |
+| **How you configure it** | `service_endpoints = ["Microsoft.Sql"]` on the subnet in Terraform | `az ad sp create-for-rbac` — gives Client ID + Secret |
+| **What it prevents** | Traffic from the internet or other VNets reaching your PaaS service | Unauthorised apps and scripts from authenticating to Azure |
+| **Analogy** | Private road — only your building can use it | ID card — proves who you are at the door |
+| **In AzureShop** | AKS subnet → SQL, Cosmos DB, Key Vault | `sp-azureshop-terraform` — Terraform uses it to create infrastructure |
+
+### In AzureShop — Who Uses What
+
+```
+Terraform (running on your Mac)
+  ├── Uses Service Principal (sp-azureshop-terraform)
+  │     → proves to Azure AD: "I am Terraform, I have Contributor role"
+  │     → creates VNet, AKS, SQL, etc.
+  │
+  └── Creates Service Endpoints on the AKS subnet
+        → locks SQL so only aks_subnet traffic is allowed
+
+AKS pod (user-service)
+  ├── Reaches SQL via Service Endpoint (private route — no internet)
+  └── Logs in to SQL using credentials fetched from Key Vault (CSI Driver)
+```
+
+### Interview Prep
+
+1. **What is the difference between a Service Endpoint and a Service Principal?** — Service Endpoint is a networking concept — it creates a private route from a VNet subnet to a PaaS service and blocks all other traffic. Service Principal is an identity concept — it's an account that applications use to authenticate to Azure AD.
+2. **Can you have a Service Endpoint without a Service Principal?** — Yes. Service Endpoint controls network access. Service Principal controls identity. They are independent layers. AzureShop uses both — Service Endpoints for network security, Service Principals for Terraform and pipeline authentication.
+3. **Which layer would block an attacker who has stolen SQL credentials but is connecting from a home network?** — The Service Endpoint (network layer). The firewall rule only allows traffic from the AKS subnet. A home IP is not in that subnet — the connection is blocked before credentials are even checked.
+4. **Which layer would block an attacker who is inside the AKS subnet but does not have SQL credentials?** — The identity/authentication layer. The attacker's traffic reaches SQL (correct network), but SQL rejects the login because the credentials are wrong.
