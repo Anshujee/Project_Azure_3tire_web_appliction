@@ -23,6 +23,7 @@ Covers: Terraform state, locking, variables, locals, sensitive values, NSG, ASG,
 14. [What is RBAC?](#q14-what-is-rbac)
 15. [Difference Between for_each and for in Terraform](#q15-difference-between-for_each-and-for-in-terraform)
 16. [How Does Log Analytics Work? How is it Different From Prometheus?](#q16-how-does-log-analytics-work-how-is-it-different-from-prometheus)
+17. [What is lifecycle ignore_changes and Why Do We Use It on the AKS Node Pool?](#q17-what-is-lifecycle-ignore_changes-and-why-do-we-use-it-on-the-aks-node-pool)
 
 ---
 
@@ -1771,5 +1772,184 @@ Collects logs AND metrics AND traces
 | Compliance, long-term log retention | Log Analytics |
 
 In AzureShop we use Log Analytics — everything is Azure-native, zero Prometheus setup needed.
+
+---
+
+## Q17. What is lifecycle ignore_changes and Why Do We Use It on the AKS Node Pool?
+
+### The Problem — Two Systems Fighting Over the Same Value
+
+Imagine you have a whiteboard in an office. Two people can write on it.
+
+```
+Person 1 = Kubernetes Cluster Autoscaler (lives inside AKS)
+Person 2 = Terraform (runs from your laptop or pipeline)
+```
+
+Both of them write the same thing on the whiteboard: **node_count**.
+
+---
+
+### What Each One Does
+
+**The Cluster Autoscaler** watches your pods constantly:
+
+```
+Normal time (few users):
+  Only 4 pods scheduled → 1 node is enough → autoscaler sets node_count = 1
+
+Peak time (many users):
+  20 pods need to run → 1 node is full → autoscaler sets node_count = 3
+```
+
+It increases and decreases `node_count` automatically based on real traffic. This is the whole point of autoscaling — you don't pay for 3 nodes at 3am when traffic is low.
+
+**Terraform** also has `node_count` in your tfvars:
+
+```hcl
+user_node_count = 2
+```
+
+Every time `terraform apply` runs (during a pipeline, or manually), Terraform looks at the real Azure state and compares it to what your code says:
+
+```
+Terraform sees:    node_count = 2  (in your tfvars)
+Azure has:         node_count = 3  (autoscaler scaled up for traffic)
+
+Terraform thinks:  "Someone changed this! I need to fix it."
+Terraform does:    Scales node_count back down to 2
+```
+
+---
+
+### What Happens Without `ignore_changes`
+
+Exact sequence of events that breaks your cluster:
+
+```
+Step 1 — Monday 9am
+  Traffic is low → autoscaler sets node_count = 1
+  Your code says node_count = 2
+
+Step 2 — Monday 10am — pipeline runs terraform apply
+  Terraform sees: Azure has 1, code says 2
+  Terraform scales UP to 2 ← harmless this time
+
+Step 3 — Monday 2pm
+  Black Friday traffic hits
+  Autoscaler detects pods are pending (not enough nodes)
+  Autoscaler scales UP → node_count = 5
+  All 8 services running fine across 5 nodes
+
+Step 4 — Monday 3pm — pipeline runs terraform apply
+  Terraform sees: Azure has 5, code says 2
+  Terraform says: "Drift detected. Fixing."
+  Terraform scales DOWN to 2
+
+Step 5 — Immediate consequence
+  3 nodes are drained and deleted
+  All pods on those 3 nodes are EVICTED
+  Kubernetes tries to reschedule evicted pods on 2 remaining nodes
+  Not enough capacity → some pods stay Pending → services are DOWN
+```
+
+**Your pipeline just caused an outage during peak traffic.** And it did it silently — the pipeline shows green because Terraform successfully applied the change.
+
+---
+
+### What `ignore_changes` Does
+
+```hcl
+lifecycle {
+  ignore_changes = [node_count]
+}
+```
+
+This tells Terraform one simple rule:
+
+> "You created this node pool. You own everything about it — VM size, OS disk, labels, taints. But `node_count`? That field belongs to the autoscaler. Never touch it again after creation."
+
+```
+Step 3 (same scenario) — Autoscaler sets node_count = 5
+
+Step 4 — Pipeline runs terraform apply
+  Terraform sees: Azure has 5, code says 2
+  Terraform checks lifecycle block
+  Terraform says: "node_count is in ignore_changes — skip it"
+  Terraform applies NOTHING for this field
+
+Step 5 — Cluster stays at 5 nodes
+  All pods keep running
+  No outage
+```
+
+---
+
+### The Simple Mental Model — The Parking Valet
+
+Think of it like this. You hire a parking valet (Terraform) to manage your car park.
+
+- Terraform's job: set up the car park, paint the lines, install the barriers.
+- The autoscaler's job: decide how many cars are parked at any given moment.
+
+**Without `ignore_changes`:**
+Every morning Terraform walks in and says "There should be exactly 2 cars here" and tows away all the extra cars — even if the car park is legitimately full of customers.
+
+**With `ignore_changes`:**
+Terraform sets up the car park once and says "The autoscaler owns the car count. I will not interfere."
+
+---
+
+### In AzureShop — Exactly Where This Is Used
+
+```hcl
+# infra/modules/aks/main.tf
+
+resource "azurerm_kubernetes_cluster_node_pool" "user" {
+  name                  = "user"
+  kubernetes_cluster_id = azurerm_kubernetes_cluster.main.id
+  vm_size               = var.user_node_vm_size
+  node_count            = var.user_node_count     # initial count only — autoscaler takes over after this
+  min_count             = var.user_min_count
+  max_count             = var.user_max_count
+  enable_auto_scaling   = true
+
+  lifecycle {
+    ignore_changes = [node_count]   # autoscaler owns this field after creation
+  }
+}
+```
+
+`node_count` here is the **initial count** — how many nodes to start with when the pool is first created. After that, the autoscaler takes over and Terraform steps back.
+
+---
+
+### When to Use vs When NOT to Use
+
+| Situation | What to do |
+|---|---|
+| `enable_auto_scaling = true` | Use `ignore_changes = [node_count]` — autoscaler owns it |
+| `enable_auto_scaling = false` | Do NOT use it — Terraform owns the count |
+
+If autoscaling is off, Terraform is the only thing changing `node_count` and you want it to enforce the value you set in tfvars.
+
+---
+
+### Summary Table
+
+| | Without `ignore_changes` | With `ignore_changes` |
+|---|---|---|
+| Autoscaler scales to 5 | Next `terraform apply` resets to 2 | Terraform leaves it at 5 |
+| Pipeline runs at peak traffic | Can cause pod evictions and outage | Safe — nothing happens |
+| Who owns `node_count` | Terraform (overrides autoscaler) | Autoscaler (Terraform steps back) |
+| When to use | Autoscaling disabled | Autoscaling enabled |
+
+---
+
+### Interview Answer
+
+**Q: Why do you use `lifecycle ignore_changes = [node_count]` on the AKS node pool?**
+
+> "Because the Kubernetes Cluster Autoscaler modifies `node_count` dynamically based on pod scheduling needs. If Terraform also manages that field, every `terraform apply` would reset the count to the value in tfvars — overriding the autoscaler's decisions and potentially evicting pods during peak traffic. `ignore_changes` tells Terraform to own the initial creation of the node pool but hand off `node_count` to the autoscaler permanently. Without it, your CI/CD pipeline could silently cause an outage by scaling down nodes that are actively running production pods."
 
 ---
