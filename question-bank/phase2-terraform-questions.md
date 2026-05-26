@@ -24,6 +24,7 @@ Covers: Terraform state, locking, variables, locals, sensitive values, NSG, ASG,
 15. [Difference Between for_each and for in Terraform](#q15-difference-between-for_each-and-for-in-terraform)
 16. [How Does Log Analytics Work? How is it Different From Prometheus?](#q16-how-does-log-analytics-work-how-is-it-different-from-prometheus)
 17. [What is lifecycle ignore_changes and Why Do We Use It on the AKS Node Pool?](#q17-what-is-lifecycle-ignore_changes-and-why-do-we-use-it-on-the-aks-node-pool)
+18. [How Does the Full Key Vault Secrets Flow Work — From Storage to Running Pod?](#q18-how-does-the-full-key-vault-secrets-flow-work--from-storage-to-running-pod)
 
 ---
 
@@ -1951,5 +1952,323 @@ If autoscaling is off, Terraform is the only thing changing `node_count` and you
 **Q: Why do you use `lifecycle ignore_changes = [node_count]` on the AKS node pool?**
 
 > "Because the Kubernetes Cluster Autoscaler modifies `node_count` dynamically based on pod scheduling needs. If Terraform also manages that field, every `terraform apply` would reset the count to the value in tfvars — overriding the autoscaler's decisions and potentially evicting pods during peak traffic. `ignore_changes` tells Terraform to own the initial creation of the node pool but hand off `node_count` to the autoscaler permanently. Without it, your CI/CD pipeline could silently cause an outage by scaling down nodes that are actively running production pods."
+
+---
+
+## Q18. How Does the Full Key Vault Secrets Flow Work — From Storage to Running Pod?
+
+### Why Does This Exist?
+
+Before Key Vault + CSI Driver, teams stored secrets like this:
+
+```yaml
+# In Kubernetes YAML — BAD approach
+env:
+  - name: DB_PASSWORD
+    value: "TUNSI@2027archu"    # hardcoded in file
+```
+
+This file is in Git. Anyone with repo access sees the password. If the repo is leaked — the database is compromised.
+
+The goal of Key Vault + CSI Driver is:
+
+```
+Secret NEVER appears in:
+  ❌ Git files
+  ❌ Docker images
+  ❌ Kubernetes YAML
+  ❌ Pipeline logs
+  ❌ Environment tfvars
+
+Secret ONLY lives in:
+  ✅ Azure Key Vault (encrypted, access-controlled, audited)
+  ✅ Running pod memory (injected at runtime, never on disk)
+```
+
+---
+
+### The Four Actors
+
+| Actor | Role |
+|---|---|
+| Azure Key Vault | The safe — stores secrets encrypted, every access logged |
+| Terraform | Puts secrets INTO the safe during `terraform apply` |
+| CSI Driver | Fetches secrets FROM the safe and delivers to pods |
+| Your Pod | Reads secrets as env vars — never talks to Key Vault directly |
+
+---
+
+### Stage 1 — Terraform Puts Secrets INTO Key Vault
+
+This happens during `terraform apply`. Terraform creates the Key Vault first, then writes every secret:
+
+```hcl
+# infra/modules/keyvault/main.tf
+
+resource "azurerm_key_vault_secret" "sql_password" {
+  name         = "sql-admin-password"
+  value        = var.sql_admin_password    # comes from TF_VAR_sql_admin_password
+  key_vault_id = azurerm_key_vault.main.id
+}
+
+resource "azurerm_key_vault_secret" "redis_key" {
+  name         = "redis-primary-access-key"
+  value        = azurerm_redis_cache.main.primary_access_key
+  key_vault_id = azurerm_key_vault.main.id
+}
+```
+
+After `terraform apply`, Key Vault holds all secrets:
+
+```
+Key Vault: kv-azureshop-6a6c-dev
+  ├── sql-admin-password        = "TUNSI@2027archu"
+  ├── sql-server-fqdn           = "sql-azureshop-dev.database.windows.net"
+  ├── sql-admin-username        = "sqladmin"
+  ├── redis-hostname            = "redis-azureshop-dev.redis.cache.windows.net"
+  ├── redis-primary-access-key  = "abc123xyz..."
+  ├── cosmos-endpoint           = "https://cosmos-azureshop-dev..."
+  ├── cosmos-primary-key        = "def456uvw..."
+  └── appinsights-user-service-cs = "InstrumentationKey=..."
+```
+
+Terraform is done. It never touches these secrets again.
+
+---
+
+### Stage 2 — CSI Driver is Installed on Every Node
+
+This Terraform config installs the CSI Driver:
+
+```hcl
+# infra/modules/aks/main.tf
+
+key_vault_secrets_provider {
+  secret_rotation_enabled  = true
+  secret_rotation_interval = "2m"
+}
+```
+
+The CSI Driver runs as a **DaemonSet** — one copy on every AKS node automatically:
+
+```
+AKS Cluster
+  ├── Node 1 (system) → csi-secrets-store-provider-azure pod
+  ├── Node 2 (system) → csi-secrets-store-provider-azure pod
+  └── Node 3 (user)   → csi-secrets-store-provider-azure pod
+```
+
+Think of the CSI Driver as a **middleman agent** sitting on every node, waiting to be asked: "go fetch these secrets from Key Vault."
+
+**CSI** = Container Storage Interface — a standard that lets Kubernetes talk to external storage systems (in this case, Azure Key Vault) using the same volume mount mechanism it uses for disks.
+
+---
+
+### Stage 3 — SecretProviderClass Tells the CSI Driver WHAT to Fetch
+
+A **SecretProviderClass** is a Kubernetes object that acts as a shopping list + instructions for the CSI Driver:
+
+```yaml
+# k8s/secret-provider-classes/user-service.yaml
+
+apiVersion: secrets-store.csi.x-k8s.io/v1
+kind: SecretProviderClass
+metadata:
+  name: user-service-secrets
+  namespace: dev
+spec:
+  provider: azure
+  parameters:
+    useVMManagedIdentity: "true"
+    userAssignedIdentityID: "d755c00c-..."   # CSI addon identity Client ID
+    keyvaultName: "kv-azureshop-6a6c-dev"
+    tenantId: "4c135936-..."
+    objects: |
+      array:
+        - |
+          objectName: sql-admin-password     # name in Key Vault
+          objectAlias: SQL_PASSWORD          # local alias
+          objectType: secret
+        - |
+          objectName: sql-server-fqdn
+          objectAlias: SQL_SERVER
+          objectType: secret
+
+  secretObjects:                             # create a real K8s Secret from fetched values
+    - secretName: user-service-secrets
+      type: Opaque
+      data:
+        - objectName: SQL_PASSWORD
+          key: SQL_PASSWORD
+        - objectName: SQL_SERVER
+          key: SQL_SERVER
+```
+
+---
+
+### Stage 4 — Helm Chart Wires Everything Together
+
+The Helm chart for user-service has two parts:
+
+**Part A — Volume definition (triggers the CSI Driver):**
+
+```yaml
+volumes:
+  - name: secrets-store
+    csi:
+      driver: secrets-store.csi.k8s.io
+      readOnly: true
+      volumeAttributes:
+        secretProviderClass: user-service-secrets
+```
+
+**Part B — Mount the volume + read env vars from the K8s Secret:**
+
+```yaml
+containers:
+  - name: user-service
+    volumeMounts:
+      - name: secrets-store
+        mountPath: /mnt/secrets
+        readOnly: true
+    envFrom:
+      - secretRef:
+          name: user-service-secrets    # read all keys as env vars
+```
+
+---
+
+### Stage 5 — What Happens When a Pod Starts
+
+Full sequence from pod scheduling to running:
+
+```
+Step 1 — Pod scheduled on Node 3
+  Kubernetes tells Node 3: "start user-service pod"
+
+Step 2 — kubelet sees the CSI volume
+  Sees: volumes.csi.driver = secrets-store.csi.k8s.io
+  Calls CSI Driver: "mount this volume for this pod"
+
+Step 3 — CSI Driver reads the SecretProviderClass
+  Looks up "user-service-secrets" SecretProviderClass
+  Reads: keyvaultName, identityID, list of secrets to fetch
+
+Step 4 — CSI Driver authenticates to Key Vault
+  Uses the addon Managed Identity (d755c00c-...)
+  Gets a short-lived Azure AD token — no password
+  Calls Key Vault API: "give me sql-admin-password, sql-server-fqdn"
+  Key Vault checks: does this identity have Key Vault Secrets User role? YES → returns values
+
+Step 5 — CSI Driver writes secrets as files
+  Creates tmpfs (in-memory, never touches disk) inside the pod:
+    /mnt/secrets/SQL_PASSWORD = "TUNSI@2027archu"
+    /mnt/secrets/SQL_SERVER   = "sql-azureshop-dev.database.windows.net"
+
+Step 6 — CSI Driver creates the Kubernetes Secret
+  Creates K8s Secret "user-service-secrets" in dev namespace:
+    SQL_PASSWORD = "TUNSI@2027archu"   (base64 encoded internally)
+    SQL_SERVER   = "sql-azureshop-dev..."
+
+Step 7 — Pod reads env vars
+  envFrom: secretRef: user-service-secrets
+  Pod gets:
+    process.env.SQL_PASSWORD = "TUNSI@2027archu"
+    process.env.SQL_SERVER   = "sql-azureshop-dev.database.windows.net"
+
+Step 8 — Pod starts successfully
+  user-service connects to SQL using env vars
+  Pod shows 1/1 Running
+```
+
+The pod never called Key Vault. The CSI Driver handled everything.
+
+---
+
+### Stage 6 — Secret Rotation (The 2-Minute Magic)
+
+With `secret_rotation_enabled = true` and `secret_rotation_interval = "2m"`:
+
+**Without rotation (old way):**
+```
+1. Change password in Key Vault
+2. Restart all pods that use it → brief downtime
+3. Pods read new password on startup
+```
+
+**With rotation enabled (AzureShop way):**
+```
+t=0:00 — You update sql-admin-password in Key Vault to "NewPass@2027"
+t=0:00 — Pod still using old password "TUNSI@2027archu"
+t=1:47 — CSI Driver rotation cycle runs
+t=1:47 — CSI Driver fetches secrets → gets "NewPass@2027"
+t=1:47 — Updates /mnt/secrets/SQL_PASSWORD file
+t=1:47 — Updates K8s Secret "user-service-secrets"
+t=1:47 — Pod reads new value from refreshed K8s Secret
+t=1:47 — Pod now uses "NewPass@2027" — no restart, no downtime
+```
+
+---
+
+### Complete End-to-End Flow Diagram
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ TERRAFORM (runs once during terraform apply)                     │
+│   Writes secrets → Azure Key Vault                              │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ AZURE KEY VAULT                                                  │
+│   sql-admin-password, redis-key, cosmos-key, appinsights-cs     │
+│   Encrypted at rest, RBAC-controlled, every access logged       │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ (CSI Driver calls Key Vault REST API)
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ CSI DRIVER (DaemonSet on every AKS node)                        │
+│   Reads SecretProviderClass → knows what to fetch               │
+│   Authenticates using Managed Identity (no password)            │
+│   Fetches secrets → writes to tmpfs volume in pod               │
+│   Creates/updates Kubernetes Secret                             │
+│   Re-runs every 2 minutes (rotation)                            │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ KUBERNETES SECRET (auto-created by CSI Driver)                  │
+│   name: user-service-secrets  namespace: dev                    │
+│   SQL_PASSWORD: <base64>   SQL_SERVER: <base64>                 │
+└──────────────────────────┬──────────────────────────────────────┘
+                           │ (envFrom: secretRef)
+                           ▼
+┌─────────────────────────────────────────────────────────────────┐
+│ POD (user-service)                                              │
+│   process.env.SQL_PASSWORD = "TUNSI@2027archu"                 │
+│   process.env.SQL_SERVER   = "sql-azureshop-dev..."            │
+│   Connects to Azure SQL — no password in code, Git, or image   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Why This is Production-Grade
+
+| Risk | Without CSI Driver | With CSI Driver |
+|---|---|---|
+| Password in Git | Possible — hardcoded in YAML | Impossible — never in YAML |
+| Password in Docker image | Possible — baked into ENV | Impossible — injected at runtime |
+| Secret rotation | Manual restart needed | Automatic — 2-minute propagation |
+| Audit trail | None | Every Key Vault access is logged |
+| Credential leak blast radius | Long-lived until manually rotated | Short-lived tokens — 1 hour max |
+
+---
+
+### Interview Answer
+
+**Q: How does secret management work in your AzureShop project?**
+
+> "We use Azure Key Vault as the single source of truth for all secrets — SQL passwords, Redis keys, Cosmos DB keys, and App Insights connection strings. Terraform writes these secrets into Key Vault during infrastructure provisioning. At runtime, the Key Vault CSI Driver — installed as a DaemonSet on every AKS node — reads the SecretProviderClass for each service, authenticates to Key Vault using a Managed Identity, fetches the required secrets, and creates a Kubernetes Secret from them. The pod reads that Kubernetes Secret as environment variables via envFrom. The pod never contacts Key Vault directly. With secret_rotation_enabled = true and a 2-minute interval, if a secret is updated in Key Vault, the CSI Driver propagates the new value to running pods within 2 minutes without any pod restarts."
 
 ---
