@@ -25,6 +25,7 @@ Covers: Terraform state, locking, variables, locals, sensitive values, NSG, ASG,
 16. [How Does Log Analytics Work? How is it Different From Prometheus?](#q16-how-does-log-analytics-work-how-is-it-different-from-prometheus)
 17. [What is lifecycle ignore_changes and Why Do We Use It on the AKS Node Pool?](#q17-what-is-lifecycle-ignore_changes-and-why-do-we-use-it-on-the-aks-node-pool)
 18. [How Does the Full Key Vault Secrets Flow Work — From Storage to Running Pod?](#q18-how-does-the-full-key-vault-secrets-flow-work--from-storage-to-running-pod)
+19. [Module 5 Key Vault — RBAC, Roles, Role Assignments, and All Core Concepts Explained](#q19-module-5-key-vault--rbac-roles-role-assignments-and-all-core-concepts-explained)
 
 ---
 
@@ -2270,5 +2271,477 @@ t=1:47 — Pod now uses "NewPass@2027" — no restart, no downtime
 **Q: How does secret management work in your AzureShop project?**
 
 > "We use Azure Key Vault as the single source of truth for all secrets — SQL passwords, Redis keys, Cosmos DB keys, and App Insights connection strings. Terraform writes these secrets into Key Vault during infrastructure provisioning. At runtime, the Key Vault CSI Driver — installed as a DaemonSet on every AKS node — reads the SecretProviderClass for each service, authenticates to Key Vault using a Managed Identity, fetches the required secrets, and creates a Kubernetes Secret from them. The pod reads that Kubernetes Secret as environment variables via envFrom. The pod never contacts Key Vault directly. With secret_rotation_enabled = true and a 2-minute interval, if a secret is updated in Key Vault, the CSI Driver propagates the new value to running pods within 2 minutes without any pod restarts."
+
+---
+
+## Q19. Module 5 Key Vault — RBAC, Roles, Role Assignments, and All Core Concepts Explained
+
+### The Big Picture First — Why Does Key Vault Exist?
+
+Imagine your application needs to connect to a database. It needs a password. Where do you store that password?
+
+**Bad options:**
+- In the code → anyone who clones the repo can steal it
+- In a `.env` file committed to git → same problem
+- Hardcoded in the Docker image → anyone who pulls the image gets the password
+- In environment variables set manually → no audit trail, easy to lose, hard to rotate
+
+**The right answer: Azure Key Vault.**
+
+Key Vault is a **locked safe in the cloud**. You put all your passwords, connection strings, and API keys there. Your application never has the password written anywhere — instead, it asks Key Vault "give me the database password" and Key Vault decides: *are you allowed to have it?*
+
+That decision of "are you allowed?" is controlled by **RBAC**.
+
+---
+
+### Concept 1 — RBAC (Role-Based Access Control)
+
+#### What is RBAC?
+
+RBAC stands for **Role-Based Access Control**. It's the system Azure uses to decide **who can do what to which resource**.
+
+Before RBAC, Azure Key Vault had something called **Access Policies**. Access Policies were a Key Vault-specific permission system — completely separate from everything else in Azure. This was confusing because you had one permission system for Key Vault and a different one for everything else.
+
+**RBAC unifies everything.** It's the same permission system used for storage accounts, virtual machines, AKS, and now Key Vault too.
+
+In our module:
+```hcl
+rbac_authorization_enabled = true
+```
+
+This one line switches Key Vault from the legacy Access Policies mode to RBAC mode. Everything after this is RBAC.
+
+#### The 3 Pillars of RBAC
+
+RBAC has exactly 3 components. Every permission in Azure is a combination of all three:
+
+```
+WHO  +  CAN DO WHAT  +  ON WHICH RESOURCE
+ ↓           ↓                 ↓
+Principal   Role            Scope
+```
+
+---
+
+### Concept 2 — Principal (WHO)
+
+A **Principal** is any identity that can be given permissions. In Azure there are 4 types:
+
+| Principal Type | What It Is | Example |
+|---|---|---|
+| User | A human with an Azure AD account | you@company.com |
+| Group | A group of users | "DevOps Team" |
+| Service Principal | An identity for an application or automation | Azure DevOps pipeline |
+| Managed Identity | A special Service Principal managed by Azure itself | AKS kubelet, CSI Driver |
+
+#### Service Principal vs Managed Identity
+
+This is a critical distinction:
+
+**Service Principal:**
+- You create it manually
+- Azure gives you a Client ID + Client Secret (like a username + password for the app)
+- You must store and rotate the secret yourself
+- Used by: Azure DevOps pipeline (it needs credentials to talk to Azure)
+
+**Managed Identity:**
+- Azure creates and manages it automatically
+- No password — Azure handles authentication behind the scenes using certificates it manages
+- You never see or store any secret
+- Used by: AKS kubelet identity, CSI Driver addon identity
+
+**Analogy:** A Service Principal is like an employee ID card you print yourself — you handle it. A Managed Identity is like a biometric chip Azure implants — you never hold the credential, Azure manages it.
+
+In our module, we deal with 3 principals:
+
+1. **`data.azurerm_client_config.current.object_id`** — Terraform itself (Service Principal running `terraform apply`)
+2. **`var.aks_identity_id`** — AKS kubelet Managed Identity
+3. **`var.pipeline_sp_object_id`** — Azure DevOps Service Principal
+
+---
+
+### Concept 3 — Role (CAN DO WHAT)
+
+A **Role** is a collection of permissions — a list of actions you are allowed to perform.
+
+Azure has hundreds of built-in roles. For Key Vault, the two roles we use are:
+
+#### Key Vault Secrets Officer
+
+```
+Permissions:
+✅ Read secrets
+✅ Write secrets (create/update)
+✅ Delete secrets
+✅ List secrets
+❌ Cannot manage Key Vault itself (can't delete the vault, can't change firewall rules)
+```
+
+Think of this as the **safe manager** — they can put things in, take things out, and manage what's inside.
+
+Used by:
+- Terraform (needs to **write** secrets during `terraform apply`)
+- Azure DevOps pipeline (needs to **read AND write** secrets during CD deployments)
+
+#### Key Vault Secrets User
+
+```
+Permissions:
+✅ Read secrets (get the value)
+❌ Cannot write, delete, or list secrets
+❌ Cannot manage Key Vault itself
+```
+
+Think of this as the **employee who needs a key from the safe** — they can only read what they're given access to, nothing more.
+
+Used by:
+- AKS kubelet identity (pods only need to **read** secrets to run the app)
+
+#### Why This Matters — Principle of Least Privilege
+
+This is a core security principle:
+
+> **Give each identity only the minimum permissions it needs to do its job. Nothing more.**
+
+If a pod only needs to read a database password, it gets `Secrets User`. If it were given `Secrets Officer`, a compromised pod could delete all secrets and bring down production. We don't give that power to pods.
+
+This principle is called **Principle of Least Privilege (PoLP)** — one of the most important concepts in security.
+
+---
+
+### Concept 4 — Scope (ON WHICH RESOURCE)
+
+**Scope** defines which resource(s) the role assignment applies to.
+
+Azure has a hierarchy:
+
+```
+Management Group
+    └── Subscription
+            └── Resource Group
+                    └── Individual Resource (e.g., Key Vault)
+```
+
+A role assignment at a higher level inherits down. If you give someone `Secrets User` at the **Subscription** level, they can read secrets from EVERY Key Vault in that subscription.
+
+In our module, all 3 role assignments use:
+```hcl
+scope = azurerm_key_vault.main.id
+```
+
+This is the **Key Vault's specific resource ID** — the most narrow scope possible. These identities can ONLY access THIS Key Vault. They can't touch any other resource.
+
+This is security best practice — always scope as narrowly as possible.
+
+---
+
+### Concept 5 — Role Assignment (Connecting WHO + WHAT + WHERE)
+
+A **Role Assignment** is the actual act of connecting a Principal + Role + Scope together.
+
+Here's the syntax pattern:
+```hcl
+resource "azurerm_role_assignment" "name" {
+  scope                = <WHICH RESOURCE>
+  role_definition_name = <WHICH ROLE>
+  principal_id         = <WHO>
+}
+```
+
+#### Role Assignment 1 — Terraform Gets Secrets Officer
+
+```hcl
+# Read current Terraform executor's identity
+data "azurerm_client_config" "current" {}
+
+resource "azurerm_role_assignment" "terraform_secrets_officer" {
+  scope                = azurerm_key_vault.main.id
+  role_definition_name = "Key Vault Secrets Officer"
+  principal_id         = data.azurerm_client_config.current.object_id
+}
+```
+
+**`data "azurerm_client_config" "current"`** — This is a Terraform **data source**. It's a read-only query that fetches information from Azure. It asks Azure: "who is running this Terraform right now?" Azure replies with:
+- `subscription_id` — which subscription
+- `tenant_id` — which Azure AD tenant
+- `object_id` — the Object ID of the identity running Terraform
+
+**Why is this needed?**
+
+When Terraform runs `terraform apply`, it needs to create secrets inside Key Vault. But to write secrets, the identity running Terraform must have permission. Without this role assignment, you'd get:
+
+```
+Error: Could not create secret "sql-admin-password"
+Status: 403 Forbidden
+Message: Caller is not authorized to perform action on resource.
+```
+
+**The chicken-and-egg dependency:**
+
+Terraform creates the Key Vault first, THEN immediately gives itself `Secrets Officer` on it, THEN creates the secrets. This happens in one `terraform apply` because Terraform automatically figures out the dependency order from the resource references.
+
+#### Role Assignment 2 — AKS Gets Secrets User
+
+```hcl
+resource "azurerm_role_assignment" "aks_secrets_user" {
+  scope                            = azurerm_key_vault.main.id
+  role_definition_name             = "Key Vault Secrets User"
+  principal_id                     = var.aks_identity_id
+  skip_service_principal_aad_check = true
+}
+```
+
+**`principal_id = var.aks_identity_id`** — The Object ID of the AKS kubelet Managed Identity. The CSI Driver uses this identity to authenticate to Key Vault and fetch secrets for pods.
+
+**`skip_service_principal_aad_check = true`** — A performance flag. Normally Terraform queries Azure AD to verify the identity exists before assigning the role. This check can fail transiently because Azure AD replication is not instant — a newly created Managed Identity might not appear immediately across all Azure AD nodes. Setting this to `true` skips the check and applies the role assignment directly.
+
+**Why `Secrets User` not `Secrets Officer`?**
+
+Pods reading secrets to start the application only need READ access. If we gave pods `Secrets Officer`, a single compromised container could delete ALL your secrets — your entire application dies instantly. Least Privilege protects you from this.
+
+#### Role Assignment 3 — Azure DevOps Pipeline Gets Secrets Officer
+
+```hcl
+resource "azurerm_role_assignment" "pipeline_secrets_officer" {
+  scope                            = azurerm_key_vault.main.id
+  role_definition_name             = "Key Vault Secrets Officer"
+  principal_id                     = var.pipeline_sp_object_id
+  skip_service_principal_aad_check = true
+}
+```
+
+**`principal_id = var.pipeline_sp_object_id`** — The Object ID of the Azure DevOps Service Principal (the identity configured in the Service Connection `sc-azureshop-azure`).
+
+**Why `Secrets Officer` for the pipeline?**
+
+The CD pipeline needs to read secrets to verify they exist and potentially write new secrets when deploying new versions. The pipeline is trusted automation — unlike a pod, it doesn't run arbitrary user code, so it gets full `Officer` access.
+
+---
+
+### Concept 6 — The Key Vault Resource Itself
+
+```hcl
+resource "azurerm_key_vault" "main" {
+  name     = "kv-${var.project}-${substr(data.azurerm_client_config.current.subscription_id, 0, 4)}-${var.environment}"
+  location = var.location
+  resource_group_name        = var.resource_group_name
+  tenant_id                  = data.azurerm_client_config.current.tenant_id
+  sku_name                   = "standard"
+  rbac_authorization_enabled = true
+  soft_delete_retention_days = 90
+  purge_protection_enabled   = true
+
+  network_acls {
+    default_action = var.network_default_action
+    bypass         = "AzureServices"
+    ip_rules       = []
+  }
+}
+```
+
+#### Name — Global Uniqueness Problem
+
+```hcl
+name = "kv-${var.project}-${substr(data.azurerm_client_config.current.subscription_id, 0, 4)}-${var.environment}"
+# Result: kv-azureshop-6a6c-dev
+```
+
+Key Vault names must be **globally unique across ALL Azure subscriptions worldwide**. `substr(subscription_id, 0, 4)` takes the first 4 characters of your subscription ID (a UUID like `6a6c3f...`). Since your subscription ID is unique to you, appending it makes your Key Vault name globally unique.
+
+#### tenant_id
+
+```hcl
+tenant_id = data.azurerm_client_config.current.tenant_id
+```
+
+**Tenant** = your company's Azure AD instance. The Key Vault must know which Azure AD to check when verifying identities. `tenant_id` tells Key Vault: "check identities against THIS company's Azure AD."
+
+#### soft_delete_retention_days = 90
+
+When you delete a Key Vault (or a secret inside it), it is NOT permanently gone. It goes into a **soft-deleted** state and stays there for 90 days. During those 90 days you can recover it.
+
+This is exactly why we hit **Issue #2** in our project — when we ran `terraform destroy`, the Key Vault went soft-deleted. When we tried to create a new one with the same name, Azure said "that name is already taken by a soft-deleted vault."
+
+#### purge_protection_enabled = true
+
+Even after 90 days, you normally could "purge" (permanently delete) early. With `purge_protection_enabled = true`, **nobody can permanently delete the vault until the 90 days expire** — not even subscription owners. This prevents an attacker who gets admin access from wiping your secrets.
+
+The trade-off: if you destroy and want to recreate with the same name, you MUST wait 90 days or recover the old vault — exactly what happened to us in Issue #2.
+
+#### network_acls
+
+```hcl
+network_acls {
+  default_action = var.network_default_action  # "Allow" in dev, "Deny" in prod
+  bypass         = "AzureServices"
+  ip_rules       = []
+}
+```
+
+This is a firewall for Key Vault:
+
+- **`default_action = "Deny"`** in production — no IP address can access Key Vault by default. Only traffic from approved VNets (via Service Endpoints) gets through.
+- **`bypass = "AzureServices"`** — trusted Azure services like Azure Monitor and Azure Pipelines are always allowed, even with `default_action = "Deny"`. These use internal Azure backbone networks.
+- **`default_action = "Allow"`** in dev — simpler config for development (but RBAC still gates who can read secrets).
+
+**Important:** Network ACLs and RBAC work as TWO separate layers:
+1. Network ACL decides: "can this IP/network even reach Key Vault?"
+2. RBAC decides: "does this identity have permission to read this secret?"
+
+Both must pass. A Managed Identity with `Secrets User` role but connecting from a blocked IP still gets rejected.
+
+---
+
+### Concept 7 — Secrets and the depends_on Pattern
+
+```hcl
+resource "azurerm_key_vault_secret" "sql_admin_password" {
+  name         = "sql-admin-password"
+  value        = var.sql_admin_password
+  key_vault_id = azurerm_key_vault.main.id
+  tags         = var.tags
+
+  depends_on = [azurerm_role_assignment.terraform_secrets_officer]
+}
+```
+
+#### depends_on — Explicit Dependency on Permissions
+
+Terraform figures out dependency order automatically from resource references. But sometimes the dependency is not visible in the code — it's **implicit**.
+
+Here: `azurerm_key_vault_secret` only references `azurerm_key_vault.main.id` — it doesn't reference the role assignment. Without `depends_on`, Terraform might try to create the secret and the role assignment in parallel. If the secret creation runs before the role assignment finishes, Terraform gets 403 Forbidden.
+
+`depends_on = [azurerm_role_assignment.terraform_secrets_officer]` tells Terraform: "don't even try to create secrets until the role assignment is fully done."
+
+**Rule of thumb:** Use `depends_on` when the dependency is on **permissions**, not on resource IDs.
+
+#### sensitive = true in variables.tf
+
+```hcl
+variable "sql_admin_password" {
+  type      = string
+  sensitive = true
+}
+```
+
+Terraform will:
+- Never print this value in `terraform plan` or `terraform apply` output
+- Always show `(sensitive value)` instead
+- Prevent accidental logging of secrets in CI/CD pipelines
+
+---
+
+### Concept 8 — for_each Pattern for App Insights Secrets
+
+```hcl
+resource "azurerm_key_vault_secret" "appinsights_connection_strings" {
+  for_each = toset(nonsensitive(keys(var.application_insights_connection_strings)))
+
+  name         = "appinsights-${each.key}-cs"
+  value        = var.application_insights_connection_strings[each.key]
+  key_vault_id = azurerm_key_vault.main.id
+  tags         = var.tags
+
+  depends_on = [azurerm_role_assignment.terraform_secrets_officer]
+}
+```
+
+We have 8 services, each with its own App Insights connection string. Instead of writing 8 separate `azurerm_key_vault_secret` resources, we use `for_each`.
+
+**Input variable:**
+```hcl
+variable "application_insights_connection_strings" {
+  type = map(string)
+  # Example value:
+  # {
+  #   "user-service"     = "InstrumentationKey=abc123;..."
+  #   "product-service"  = "InstrumentationKey=def456;..."
+  #   "cart-service"     = "InstrumentationKey=ghi789;..."
+  #   ... 8 services total
+  # }
+}
+```
+
+**The expression breakdown — reading inside out:**
+
+```
+toset(nonsensitive(keys(var.application_insights_connection_strings)))
+```
+
+1. `keys(...)` — extracts just the keys from the map: `["user-service", "product-service", ...]`
+2. `nonsensitive(...)` — the entire map is marked sensitive (it contains connection strings). The KEYS (service names) are not sensitive — they're just names. `nonsensitive()` tells Terraform: "these keys are safe to use as resource identifiers." Without this, Terraform refuses to use sensitive values as `for_each` keys.
+3. `toset(...)` — converts the list to a Set. `for_each` requires a Set or Map, not a List.
+
+**Result:** Terraform creates 8 secrets automatically:
+- `appinsights-user-service-cs`
+- `appinsights-product-service-cs`
+- `appinsights-cart-service-cs`
+- ... and so on
+
+This is much cleaner than writing 8 identical resource blocks.
+
+---
+
+### The Complete Picture — How Everything Connects
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         AZURE KEY VAULT                         │
+│                    kv-azureshop-6a6c-dev                        │
+│                                                                 │
+│  Secrets stored:                                                │
+│  • sql-server-fqdn          • cosmos-primary-key               │
+│  • sql-admin-username        • redis-hostname                   │
+│  • sql-admin-password        • redis-primary-access-key         │
+│  • cosmos-endpoint           • appinsights-*-cs (×8)           │
+│                                                                 │
+│  FIREWALL: network_acls → only AzureServices + VNet            │
+│  ACCESS:   rbac_authorization_enabled = true                    │
+└────────────────────────┬────────────────────────────────────────┘
+                         │
+          ┌──────────────┼──────────────┐
+          ▼              ▼              ▼
+  ┌───────────────┐ ┌──────────────┐ ┌─────────────────┐
+  │   Terraform   │ │  AKS Kubelet │ │  Azure DevOps   │
+  │   (SP)        │ │  Identity    │ │  Pipeline (SP)  │
+  │               │ │  (Managed)   │ │                 │
+  │ Secrets       │ │ Secrets      │ │ Secrets         │
+  │ OFFICER       │ │ USER         │ │ OFFICER         │
+  │ (read+write)  │ │ (read only)  │ │ (read+write)    │
+  │               │ │              │ │                 │
+  │ During:       │ │ During:      │ │ During:         │
+  │ terraform     │ │ Pod startup  │ │ CD pipeline     │
+  │ apply         │ │ (CSI Driver) │ │ runs            │
+  └───────────────┘ └──────────────┘ └─────────────────┘
+```
+
+---
+
+### Summary — All Concepts in One Table
+
+| Concept | What It Is | Our Usage |
+|---|---|---|
+| **RBAC** | Unified Azure permission system | Enabled with `rbac_authorization_enabled = true` |
+| **Principal** | WHO gets the permission | Terraform SP, AKS kubelet, DevOps SP |
+| **Role** | WHAT they can do | `Secrets Officer` (read+write) or `Secrets User` (read only) |
+| **Scope** | ON WHICH RESOURCE | Key Vault resource ID — narrowest possible |
+| **Role Assignment** | Connecting Principal + Role + Scope | 3 assignments in this module |
+| **Managed Identity** | Password-free app identity managed by Azure | AKS kubelet — no credentials needed |
+| **Service Principal** | App identity with credentials | Terraform SP, DevOps pipeline SP |
+| **Least Privilege** | Give only minimum permissions needed | Pods get `User`, not `Officer` |
+| **Soft Delete** | 90-day recovery window after deletion | Caused Issue #2 in our project |
+| **Purge Protection** | Nobody can permanently delete early | Can't be disabled — must recover old vault |
+| **depends_on** | Explicit dependency on permissions | Secrets created only after role assignment |
+| **for_each** | Create N resources from one block | 8 App Insights secrets from one resource block |
+| **nonsensitive()** | Allow sensitive map keys in for_each | Keys (service names) are safe identifiers |
+| **data source** | Read-only query to Azure | `azurerm_client_config.current` gets Terraform's own identity |
+
+---
+
+### Interview Answer
+
+**Q: Explain RBAC and how it works in your Key Vault module.**
+
+> "In our project, Key Vault uses RBAC with `rbac_authorization_enabled = true` instead of the legacy Access Policies. RBAC has three components: Principal (who), Role (what they can do), and Scope (which resource). We have three role assignments: Terraform's own Service Principal gets `Secrets Officer` so it can write secrets during apply; the AKS kubelet Managed Identity gets `Secrets User` (read-only) because pods only need to read secrets, not write them — this is the Principle of Least Privilege; and the Azure DevOps Service Principal gets `Secrets Officer` because the pipeline may need to update secrets during CD. All three are scoped to the specific Key Vault resource ID, not the whole subscription. We also enable soft-delete (90 days) and purge protection — which we actually hit as Issue #2 when we couldn't purge the old vault after terraform destroy and had to recover it instead."
 
 ---
