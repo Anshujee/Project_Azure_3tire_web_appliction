@@ -26,6 +26,7 @@ Covers: Terraform state, locking, variables, locals, sensitive values, NSG, ASG,
 17. [What is lifecycle ignore_changes and Why Do We Use It on the AKS Node Pool?](#q17-what-is-lifecycle-ignore_changes-and-why-do-we-use-it-on-the-aks-node-pool)
 18. [How Does the Full Key Vault Secrets Flow Work — From Storage to Running Pod?](#q18-how-does-the-full-key-vault-secrets-flow-work--from-storage-to-running-pod)
 19. [Module 5 Key Vault — RBAC, Roles, Role Assignments, and All Core Concepts Explained](#q19-module-5-key-vault--rbac-roles-role-assignments-and-all-core-concepts-explained)
+20. [What is network_acls — Is It the Same as AWS NACL?](#q20-what-is-network_acls--is-it-the-same-as-aws-nacl)
 
 ---
 
@@ -2745,3 +2746,174 @@ This is much cleaner than writing 8 identical resource blocks.
 > "In our project, Key Vault uses RBAC with `rbac_authorization_enabled = true` instead of the legacy Access Policies. RBAC has three components: Principal (who), Role (what they can do), and Scope (which resource). We have three role assignments: Terraform's own Service Principal gets `Secrets Officer` so it can write secrets during apply; the AKS kubelet Managed Identity gets `Secrets User` (read-only) because pods only need to read secrets, not write them — this is the Principle of Least Privilege; and the Azure DevOps Service Principal gets `Secrets Officer` because the pipeline may need to update secrets during CD. All three are scoped to the specific Key Vault resource ID, not the whole subscription. We also enable soft-delete (90 days) and purge protection — which we actually hit as Issue #2 when we couldn't purge the old vault after terraform destroy and had to recover it instead."
 
 ---
+
+## Q20. What is network_acls — Is It the Same as AWS NACL?
+
+### Short Answer
+
+**No. Same name, completely different concepts.**
+
+---
+
+### AWS NACL — What It Is
+
+In AWS, **NACL = Network Access Control List**.
+
+It is a **subnet-level firewall** in your VPC. It sits at the boundary of a subnet and controls traffic going IN and OUT of the entire subnet.
+
+```
+AWS VPC
+└── Subnet (10.0.1.0/24)
+     │
+     ├── NACL ← firewall here, controls all traffic into/out of subnet
+     │
+     ├── EC2 Instance A
+     ├── EC2 Instance B
+     └── EC2 Instance C
+```
+
+**Key AWS NACL characteristics:**
+- Applies to the **whole subnet** — every resource inside gets the same rules
+- **Stateless** — if you allow inbound traffic on port 443, you must ALSO explicitly allow the outbound response. It doesn't remember the connection.
+- Rules have **numbers** (100, 200, 300) — evaluated in order, first match wins
+- Can have both **ALLOW and DENY** rules
+- It's an actual standalone resource you attach to a subnet
+
+---
+
+### Azure network_acls — What It Is
+
+In Azure, `network_acls` is **NOT a standalone resource**. It is a **firewall configuration block that lives inside a specific resource** — like Key Vault, Storage Account, or Cosmos DB.
+
+It only controls who can **reach that one specific resource** — not a whole subnet.
+
+```hcl
+# This is inside azurerm_key_vault — it's NOT a separate resource
+network_acls {
+  default_action = "Deny"
+  bypass         = "AzureServices"
+  ip_rules       = []
+}
+```
+
+Think of it as a **per-resource firewall setting**, not a subnet-level concept.
+
+---
+
+### Side-by-Side Comparison
+
+| Property | AWS NACL | Azure network_acls |
+|---|---|---|
+| **What it is** | Standalone VPC resource | Config block inside a resource (Key Vault, Storage, etc.) |
+| **Scope** | Entire subnet | Single specific resource |
+| **Stateful?** | Stateless (both directions needed) | Stateful (no rule needed for return traffic) |
+| **Where it sits** | Between internet and subnet | At the resource itself |
+| **Works on** | All traffic to/from subnet | Only traffic to that one resource |
+| **Closest Azure equivalent** | NSG (Network Security Group) | No direct AWS equivalent — it's resource-level firewall |
+
+---
+
+### The Azure Equivalent of AWS NACL
+
+The closest thing to AWS NACL in Azure is the **NSG (Network Security Group)**.
+
+```
+AWS                          Azure
+────                         ─────
+NACL (stateless)     ≈       NSG (stateful)
+Security Group       ≈       NSG (also covers this)
+```
+
+We have NSGs in our Terraform networking module — that is the Azure equivalent of what you know as NACL in AWS. The key difference is Azure NSG is **stateful** (return traffic is automatically allowed), while AWS NACL is **stateless** (you must explicitly allow both directions).
+
+---
+
+### Our network_acls in Key Vault
+
+```hcl
+network_acls {
+  default_action = var.network_default_action   # "Allow" in dev, "Deny" in prod
+  bypass         = "AzureServices"
+  ip_rules       = []
+}
+```
+
+#### default_action
+
+The base rule for all incoming traffic:
+
+- **`"Allow"`** — everyone can reach Key Vault by default (used in dev for simplicity). RBAC still controls who can READ secrets — the firewall is just relaxed.
+- **`"Deny"`** — nobody can reach Key Vault by default (used in prod). Only explicitly approved IPs or VNets get through.
+
+#### bypass = "AzureServices"
+
+Even when `default_action = "Deny"`, some trusted Azure services must always be able to reach Key Vault:
+- Azure Monitor (to collect diagnostic logs)
+- Azure Pipelines (to deploy)
+- Azure Backup
+
+These services use internal Azure backbone networks — not the public internet. `bypass = "AzureServices"` creates a permanent exception for them regardless of the firewall setting.
+
+#### ip_rules = []
+
+We are not allowing any specific public IP addresses. In our setup, all traffic comes from inside the VNet (AKS pods, pipeline agents) via Service Endpoints — not from specific public IPs.
+
+In production, if you needed to allow a specific office IP to access Key Vault directly, you would add it here:
+```hcl
+ip_rules = ["203.0.113.45"]
+```
+
+---
+
+### The Two-Layer Security Model
+
+`network_acls` and RBAC are **two independent layers**. Both must pass for a request to succeed:
+
+```
+Request to read a secret
+         │
+         ▼
+┌─────────────────────────┐
+│   Layer 1: network_acls │  "Can your IP/VNet even reach Key Vault?"
+│   (Firewall)            │
+└────────────┬────────────┘
+             │ PASS
+             ▼
+┌─────────────────────────┐
+│   Layer 2: RBAC         │  "Does your identity have permission to read this secret?"
+│   (Permission)          │
+└────────────┬────────────┘
+             │ PASS
+             ▼
+         Secret returned
+```
+
+A request fails if EITHER layer rejects it:
+- Valid RBAC role but blocked IP → rejected at Layer 1
+- Allowed IP but wrong RBAC role → rejected at Layer 2
+
+This is **defence in depth** — two independent security controls. Even if one is misconfigured, the other still protects you.
+
+---
+
+### Summary
+
+| | AWS NACL | Azure network_acls (Key Vault) |
+|---|---|---|
+| Same concept? | No | No |
+| Scope | Entire subnet | One specific Azure resource |
+| Standalone resource? | Yes | No — config block inside a resource |
+| Azure equivalent of AWS NACL | — | NSG (Network Security Group) |
+| AWS equivalent of Azure network_acls | — | No direct equivalent |
+
+**One-line rule to remember:**
+> AWS NACL = subnet firewall → Azure equivalent is NSG.
+> Azure `network_acls` = per-resource firewall → no direct AWS equivalent.
+
+---
+
+### Interview Answer
+
+**Q: What is network_acls in Azure Key Vault and how is it different from AWS NACL?**
+
+> "In Azure, `network_acls` is a per-resource firewall configuration block — it lives inside resources like Key Vault or Storage Account and controls which IPs or VNets can reach that specific resource. It is NOT the same as AWS NACL. AWS NACL is a subnet-level firewall — a standalone resource that controls all traffic going in and out of an entire subnet. The Azure equivalent of AWS NACL is an NSG (Network Security Group), which is also subnet or NIC-level but stateful unlike AWS NACL which is stateless. In our Key Vault module, we use network_acls with `default_action = Deny` in production and `bypass = AzureServices` to always allow trusted Azure services like Pipelines and Monitor. This works alongside RBAC as a two-layer security model — network_acls controls whether the traffic can reach Key Vault at all, and RBAC controls whether the identity has permission to read the secret."
