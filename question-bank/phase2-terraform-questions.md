@@ -29,6 +29,7 @@ Covers: Terraform state, locking, variables, locals, sensitive values, NSG, ASG,
 20. [What is network_acls — Is It the Same as AWS NACL?](#q20-what-is-network_acls--is-it-the-same-as-aws-nacl)
 21. [Module 6 Application Gateway and WAF — Full Working Concept Explained](#q21-module-6-application-gateway-and-waf--full-working-concept-explained)
 22. [Module 7 Monitoring — Log Analytics, App Insights, Grafana, Prometheus, SLIs, SLOs, and Error Budgets](#q22-module-7-monitoring--log-analytics-app-insights-grafana-prometheus-slis-slos-and-error-budgets)
+23. [Application Insights — Complete Deep Dive: How and Where It Is Used in AzureShop](#q23-application-insights--complete-deep-dive-how-and-where-it-is-used-in-azureshop)
 
 ---
 
@@ -3901,3 +3902,395 @@ DeploymentUnavailable (0 replicas 2m) → 100% error rate, entire budget in minu
 **Q7: Why does each microservice get its own Application Insights instance?**
 
 > "Three reasons. First, isolation — one service's high traffic volume does not drown out alerts and data from another service. Second, ownership — each team looks at their service's Application Insights without seeing unrelated services' data. Third, cost attribution — in production, you can see exactly how much telemetry each service generates and optimise accordingly. All 8 instances share the same Log Analytics Workspace as their backend store, so when you need to query across all services during an incident, you can still do cross-service KQL queries. Isolated by default, unified when needed."
+
+---
+
+## Q23. Application Insights — Complete Deep Dive: How and Where It Is Used in AzureShop
+
+### What is Application Insights?
+
+Application Insights is **Azure's APM — Application Performance Monitoring** service.
+
+APM means: you embed a small library (SDK) into your application code. That SDK silently watches everything your app does — every HTTP request, every database call, every error, every slow response — and sends that data to Azure.
+
+**Analogy:** Imagine you hired a silent observer to sit beside every developer working in your office. The observer writes down: "At 2:14pm, the user-service made a database query that took 3 seconds. At 2:15pm, the payment function threw a NullPointerException." You never have to add log statements — the observer catches everything automatically. That observer is Application Insights.
+
+---
+
+### Where Application Insights Lives in AzureShop
+
+Application Insights touches **5 different layers** of the project:
+
+```
+Layer 1: Terraform (infra/modules/monitoring/main.tf)
+         → Creates one App Insights resource per service in Azure
+
+Layer 2: Key Vault (infra/modules/keyvault/main.tf)
+         → Stores the connection string as a secret
+
+Layer 3: SecretProviderClass (k8s/secret-provider-classes/*.yaml)
+         → Pulls the secret from Key Vault into the pod
+
+Layer 4: Helm Deployment (helm/charts/*/templates/deployment.yaml)
+         → Injects the connection string as an environment variable
+
+Layer 5: telemetry.js / telemetry.py (services/*/src/telemetry.js)
+         → SDK reads the env var and starts monitoring
+```
+
+---
+
+### Layer 1 — Terraform Creates App Insights (One Per Service)
+
+```hcl
+resource "azurerm_application_insights" "services" {
+  for_each         = toset(var.services)
+  name             = "appi-${each.key}-${var.environment}"
+  workspace_id     = azurerm_log_analytics_workspace.main.id
+  application_type = each.key == "product-service" ? "other" : "web"
+}
+```
+
+Terraform creates **8 separate App Insights instances** — one per microservice:
+
+```
+appi-user-service-dev        appi-order-service-dev
+appi-product-service-dev     appi-payment-service-dev
+appi-cart-service-dev        appi-notification-service-dev
+appi-api-gateway-dev         appi-frontend-dev
+```
+
+#### Why 8 Separate Instances, Not 1 Shared?
+
+Think of a hospital. Each department (cardiology, neurology, emergency) has its own monitoring system. You do not want cardiology alarms mixed with emergency alerts. Same here — each team sees only their service's data clearly. But all 8 feed into the **same Log Analytics Workspace**, so cross-service KQL queries work during incidents.
+
+#### application_type = "web" vs "other"
+
+```hcl
+application_type = each.key == "product-service" ? "other" : "web"
+```
+
+| Value | Use For | Why |
+|---|---|---|
+| `"web"` | Node.js, .NET, Java | App Insights understands HTTP framework natively |
+| `"other"` | Python/FastAPI | Uses OpenTelemetry instead of native SDK |
+
+product-service is Python/FastAPI so it gets `"other"`. All other services are Node.js so they get `"web"`. Choosing the wrong type causes some telemetry to not appear correctly in the Azure Portal.
+
+---
+
+### Layer 2 — Connection String Flows to Key Vault
+
+The monitoring module outputs all 8 connection strings as a map:
+
+```hcl
+output "application_insights_connection_strings" {
+  value = {
+    for svc, appi in azurerm_application_insights.services :
+    svc => appi.connection_string
+  }
+  sensitive = true
+}
+# Result:
+# {
+#   "user-service"    = "InstrumentationKey=abc123;IngestionEndpoint=..."
+#   "product-service" = "InstrumentationKey=def456;IngestionEndpoint=..."
+#   ...
+# }
+```
+
+The keyvault module writes one Key Vault secret per service:
+```
+Key Vault secret: appinsights-user-service-cs    → "InstrumentationKey=abc123;..."
+Key Vault secret: appinsights-product-service-cs → "InstrumentationKey=def456;..."
+... and so on for all 8 services
+```
+
+#### Connection String vs Instrumentation Key
+
+Always use Connection String — not the old Instrumentation Key alone:
+
+| | Instrumentation Key | Connection String |
+|---|---|---|
+| Format | UUID only | Full URL + key |
+| Status | Deprecated | Current standard |
+| Why | — | Contains exact ingestion endpoint — works in sovereign clouds too |
+
+---
+
+### Layer 3 — SecretProviderClass Pulls It Into the Pod
+
+```yaml
+# k8s/secret-provider-classes/user-service.yaml
+spec:
+  parameters:
+    objects: |
+      array:
+        - |
+          objectName: sql-server-fqdn
+          objectType: secret
+        - |
+          objectName: sql-admin-username
+          objectType: secret
+        - |
+          objectName: sql-admin-password
+          objectType: secret
+        - |
+          objectName: appinsights-user-service-cs   # ← App Insights secret
+          objectType: secret
+  secretObjects:
+    - secretName: user-service-secrets
+      type: Opaque
+      data:
+        - objectName: appinsights-user-service-cs
+          key: APPINSIGHTS_CONNECTION_STRING         # ← becomes this env var name
+```
+
+The CSI Driver reads `appinsights-user-service-cs` from Key Vault and creates a Kubernetes Secret entry with key `APPINSIGHTS_CONNECTION_STRING`.
+
+---
+
+### Layer 4 — Helm Deployment Injects It as an Environment Variable
+
+```yaml
+# helm/charts/user-service/templates/deployment.yaml
+envFrom:
+  - secretRef:
+      name: user-service-secrets   # loads ALL keys from this K8s Secret as env vars
+
+volumes:
+  - name: secrets-store
+    csi:
+      driver: secrets-store.csi.k8s.io
+      volumeAttributes:
+        secretProviderClass: user-service-secrets   # triggers CSI secret fetch
+```
+
+`envFrom: secretRef` loads every key from the Kubernetes Secret as an environment variable. The pod gets:
+
+```
+SQL_SERVER                    = "sql-azureshop-dev.database.windows.net"
+SQL_USER                      = "sqladmin"
+SQL_PASSWORD                  = "TUNSI@2027archu"
+APPINSIGHTS_CONNECTION_STRING = "InstrumentationKey=abc123;IngestionEndpoint=..."
+```
+
+The App Insights SDK reads `APPLICATIONINSIGHTS_CONNECTION_STRING` automatically — that is the standard environment variable name the SDK looks for.
+
+---
+
+### Layer 5 — telemetry.js (Node.js Services)
+
+```javascript
+// services/user-service/src/telemetry.js
+
+'use strict';
+
+// App Insights MUST be set up before any other requires so the SDK
+// can monkey-patch express, mssql, and other modules for auto-instrumentation
+if (process.env.APPLICATIONINSIGHTS_CONNECTION_STRING) {
+  const appInsights = require('applicationinsights');
+  appInsights
+    .setup(process.env.APPLICATIONINSIGHTS_CONNECTION_STRING)
+    .setAutoDependencyCorrelation(true)   // links requests to their dependencies
+    .setAutoCollectRequests(true)          // tracks every HTTP request automatically
+    .setAutoCollectPerformance(true)       // tracks CPU, memory, GC metrics
+    .setAutoCollectExceptions(true)        // catches every unhandled exception
+    .setAutoCollectDependencies(true)      // tracks DB calls, Redis calls, HTTP calls
+    .setAutoCollectConsole(true, true)     // sends console.log/error to App Insights
+    .setSendLiveMetrics(false)             // disables live stream (saves cost in dev)
+    .start();
+}
+```
+
+#### Why Must App Insights Start FIRST?
+
+App Insights works by **monkey-patching** — it modifies the internal code of libraries like Express, `mssql`, and `redis` at the module level. It wraps their functions to add telemetry tracking.
+
+If you `require('express')` before App Insights starts, Express is already loaded in its original form. App Insights cannot patch it anymore — it missed the window. You lose all HTTP request tracking.
+
+Loading App Insights first = it patches everything as modules load = automatic tracking everywhere.
+
+#### Each Setting Explained
+
+**`setAutoDependencyCorrelation(true)`** — Enables **Distributed Tracing**. When user-service calls order-service which calls payment-service, App Insights injects a **correlation ID** into HTTP headers of each downstream call. All services include this same ID in their telemetry. In the Azure Portal you can see the full chain of calls under one "transaction." Without this, you have 4 separate unconnected requests.
+
+**`setAutoCollectRequests(true)`** — Automatically tracks every incoming HTTP request: URL, method, response code, duration, success or failure. Zero code changes needed.
+
+**`setAutoCollectPerformance(true)`** — Collects Node.js runtime metrics: CPU usage, memory heap size, garbage collection pauses, event loop lag. GC pauses and event loop lag cause latency spikes — this data explains why.
+
+**`setAutoCollectExceptions(true)`** — Catches every unhandled exception and sends it to App Insights with the full stack trace, exact file, line number, and call stack. Without this, exceptions may only appear in stdout logs.
+
+**`setAutoCollectDependencies(true)`** — Automatically tracks every call your service makes to other systems:
+
+| Your service calls... | App Insights tracks... |
+|---|---|
+| Azure SQL (via mssql) | Query text, duration, success/fail |
+| Redis (via ioredis) | Command, key, duration |
+| HTTP to another service | URL, status code, duration |
+| Azure Service Bus | Message send/receive, duration |
+
+No code needed — the SDK patches the mssql and Redis libraries automatically.
+
+**`setAutoCollectConsole(true, true)`** — Sends `console.log()`, `console.warn()`, `console.error()` output to App Insights as trace telemetry. Existing log statements appear in the Azure Portal without any code changes.
+
+**`setSendLiveMetrics(false)`** — Live Metrics = real-time data stream updated every second. Useful during deployments. Disabled in dev to save the cost of continuous streaming.
+
+#### The Prometheus Part of telemetry.js
+
+The same file also runs Prometheus metrics independently:
+
+```javascript
+const client = require('prom-client');
+
+const register = new client.Registry();
+register.setDefaultLabels({ service: 'user-service' });
+client.collectDefaultMetrics({ register });
+
+const httpRequestsTotal = new client.Counter({
+  name: 'http_requests_total',
+  labelNames: ['method', 'route', 'status_code'],
+  registers: [register],
+});
+
+const httpRequestDuration = new client.Histogram({
+  name: 'http_request_duration_seconds',
+  labelNames: ['method', 'route', 'status_code'],
+  buckets: [0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5],
+  registers: [register],
+});
+
+function metricsMiddleware(req, res, next) {
+  if (req.path === '/metrics') return next();   // skip Prometheus scrape requests
+  const start = process.hrtime();
+  res.on('finish', () => {
+    const [s, ns] = process.hrtime(start);
+    const route = req.route ? req.baseUrl + req.route.path : req.path;
+    const labels = { method: req.method, route, status_code: res.statusCode };
+    httpRequestsTotal.inc(labels);
+    httpRequestDuration.observe(labels, s + ns / 1e9);
+  });
+  next();
+}
+
+module.exports = { register, metricsMiddleware };
+```
+
+One `telemetry.js` file serves **two monitoring systems simultaneously**:
+- **App Insights** — automatic SDK tracking (requests, errors, dependencies, traces) → Azure Portal
+- **Prometheus** — Counter and Histogram exposed at `/metrics` → Grafana dashboards + alert rules
+
+The `if (req.path === '/metrics') return next()` line skips tracking Prometheus scrape requests themselves — otherwise thousands of `/metrics` requests would pollute dashboards.
+
+---
+
+### Layer 5 (Python) — telemetry.py (product-service)
+
+```python
+# services/product-service/app/telemetry.py
+
+from azure.monitor.opentelemetry import configure_azure_monitor
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+
+def setup_telemetry(app) -> None:
+    conn_str = os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+    if conn_str:
+        configure_azure_monitor(connection_string=conn_str)
+        FastAPIInstrumentor.instrument_app(app)
+```
+
+Python uses `azure-monitor-opentelemetry` built on **OpenTelemetry** — the vendor-neutral open standard for observability — instead of the native Node.js SDK. `FastAPIInstrumentor.instrument_app(app)` is the Python equivalent of `setAutoCollectRequests(true)`.
+
+`application_type = "other"` in Terraform reflects this — it is not the native Azure SDK type. OpenTelemetry means the same instrumentation code could send data to any backend (Datadog, New Relic) by changing only the exporter. The Prometheus metrics definitions are identical to the Node.js version — same Counter and Histogram names — so all alert rules work the same across all 8 services regardless of language.
+
+---
+
+### How It All Connects — The Complete Flow
+
+```
+TERRAFORM
+Creates appi-user-service-dev
+Outputs connection_string = "InstrumentationKey=abc123;..."
+         │
+         ▼ passed to keyvault module
+AZURE KEY VAULT
+Secret: appinsights-user-service-cs = "InstrumentationKey=abc123;..."
+         │
+         ▼ CSI Driver reads at pod startup
+SECRETPROVIDERCLASS (k8s/secret-provider-classes/user-service.yaml)
+objectName: appinsights-user-service-cs → key: APPINSIGHTS_CONNECTION_STRING
+         │
+         ▼ creates Kubernetes Secret
+KUBERNETES SECRET: user-service-secrets
+APPINSIGHTS_CONNECTION_STRING = "InstrumentationKey=abc123;..."
+         │
+         ▼ envFrom: secretRef in Helm deployment
+POD ENVIRONMENT VARIABLE
+process.env.APPLICATIONINSIGHTS_CONNECTION_STRING = "..."
+         │
+         ▼ telemetry.js reads it at startup
+APP INSIGHTS SDK
+appInsights.setup(...).setAutoCollectRequests(true)...start()
+         │
+         ▼ sends telemetry over HTTPS
+AZURE APP INSIGHTS ENDPOINT
+→ Log Analytics Workspace (law-azureshop-dev)
+→ Visible in Azure Portal + Grafana
+```
+
+---
+
+### What You See in the Azure Portal
+
+**Application Map** — Visual graph of all services and their connections. Each arrow shows average latency and error rate. Red = high error rate. Used to immediately see which service is failing and which downstream dependency it is calling.
+
+**Failures** — All 5xx responses and exceptions grouped by type. Click any failure to see the full stack trace and the exact request that triggered it.
+
+**Performance** — P50, P95, P99 latency for every endpoint. Dependency breakdown: "This endpoint took 500ms total — 450ms was a SQL query."
+
+**Transaction Search** — Find a specific user request using a correlation ID. See the entire journey across all services with timestamps.
+
+**Live Metrics** — Real-time dashboard updated every second. Used during deployments to watch for immediate regressions.
+
+---
+
+### What App Insights Collects — Summary Table
+
+| Data Type | What | How Collected |
+|---|---|---|
+| **Requests** | Every HTTP request: URL, method, status, duration | `setAutoCollectRequests(true)` |
+| **Dependencies** | DB queries, Redis, Service Bus, HTTP calls | `setAutoCollectDependencies(true)` |
+| **Exceptions** | Every unhandled error + full stack trace | `setAutoCollectExceptions(true)` |
+| **Traces** | console.log/warn/error output | `setAutoCollectConsole(true, true)` |
+| **Performance** | CPU, memory, GC, event loop lag | `setAutoCollectPerformance(true)` |
+| **Distributed traces** | Full request chain across services | `setAutoDependencyCorrelation(true)` |
+
+---
+
+### App Insights vs Prometheus — When to Use Which
+
+| Question | Use This |
+|---|---|
+| "What was the exact error when user X tried to checkout?" | App Insights — exception detail + stack trace |
+| "Is error rate above 5% right now?" | Prometheus alert |
+| "Which database query is causing slowness?" | App Insights — dependency tracking |
+| "Is memory above 85% on the cart-service pod?" | Prometheus alert |
+| "Show me the full call chain of a slow request" | App Insights — distributed tracing |
+| "Plot request rate over last 7 days on Grafana" | Prometheus metrics |
+| "Who called what between services at 14:32?" | App Insights — Application Map + Transaction Search |
+
+**Prometheus tells you there is a problem. App Insights tells you exactly where in the code.**
+
+---
+
+### Interview Answer
+
+**Q: How is Application Insights implemented in your project and what does it collect?**
+
+> "Application Insights is embedded in all 8 AzureShop microservices for application-level observability. Terraform creates one App Insights instance per service and outputs the connection strings. These are stored in Key Vault and injected into each pod as the `APPLICATIONINSIGHTS_CONNECTION_STRING` environment variable via the CSI Driver and Helm's `envFrom: secretRef` pattern — the pod never hard-codes credentials.
+>
+> In each Node.js service, `telemetry.js` must be the very first require in the application because the SDK monkey-patches Express, mssql, and Redis to enable automatic tracking. We enable `setAutoCollectRequests`, `setAutoCollectExceptions`, `setAutoCollectDependencies`, and `setAutoDependencyCorrelation`. This last one is critical — it injects correlation IDs into outgoing HTTP headers so we can trace a single user request across all services in the Application Map.
+>
+> The Python product-service uses `azure-monitor-opentelemetry` with `FastAPIInstrumentor` instead of the native SDK because it is built on OpenTelemetry.
+>
+> The same `telemetry.js` file also sets up Prometheus metrics — a Counter for request counts and a Histogram for latency with predefined buckets. These are exposed at `/metrics` for Prometheus to scrape, feeding Grafana dashboards and our 10 PrometheusRule alerts. So one file serves two monitoring systems: App Insights for deep application tracing and Prometheus for alerting and dashboards."
