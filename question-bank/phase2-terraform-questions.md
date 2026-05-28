@@ -30,6 +30,7 @@ Covers: Terraform state, locking, variables, locals, sensitive values, NSG, ASG,
 21. [Module 6 Application Gateway and WAF — Full Working Concept Explained](#q21-module-6-application-gateway-and-waf--full-working-concept-explained)
 22. [Module 7 Monitoring — Log Analytics, App Insights, Grafana, Prometheus, SLIs, SLOs, and Error Budgets](#q22-module-7-monitoring--log-analytics-app-insights-grafana-prometheus-slis-slos-and-error-budgets)
 23. [Application Insights — Complete Deep Dive: How and Where It Is Used in AzureShop](#q23-application-insights--complete-deep-dive-how-and-where-it-is-used-in-azureshop)
+24. [What is the Difference Between Prometheus, Log Analytics, and Application Insights?](#q24-what-is-the-difference-between-prometheus-log-analytics-and-application-insights)
 
 ---
 
@@ -4294,3 +4295,354 @@ AZURE APP INSIGHTS ENDPOINT
 > The Python product-service uses `azure-monitor-opentelemetry` with `FastAPIInstrumentor` instead of the native SDK because it is built on OpenTelemetry.
 >
 > The same `telemetry.js` file also sets up Prometheus metrics — a Counter for request counts and a Histogram for latency with predefined buckets. These are exposed at `/metrics` for Prometheus to scrape, feeding Grafana dashboards and our 10 PrometheusRule alerts. So one file serves two monitoring systems: App Insights for deep application tracing and Prometheus for alerting and dashboards."
+
+---
+
+## Q24. What is the Difference Between Prometheus, Log Analytics, and Application Insights?
+
+### The One-Line Difference
+
+| Tool | One Line |
+|---|---|
+| **Prometheus** | Collects and stores **numbers over time** from inside your Kubernetes cluster |
+| **Log Analytics** | Collects and stores **text logs and events** from every Azure resource |
+| **Application Insights** | Tracks **what your application code does** — requests, errors, traces, dependencies |
+
+They are NOT competitors. They solve three different problems. In AzureShop, all three run simultaneously and complement each other.
+
+---
+
+### The Hospital Analogy
+
+- **Prometheus** = the **vital signs monitor** at the bedside. It continuously shows numbers — heart rate, blood pressure, oxygen level. It beeps when a number crosses a threshold. It shows you that SOMETHING is wrong right now.
+
+- **Log Analytics** = the **hospital records system**. Every event is written down — "patient admitted at 09:00", "medication given at 10:30". You query it when investigating what happened and when.
+
+- **Application Insights** = the **doctor's notes** inside each department. Deep, specific, contextual knowledge about one patient (one service) — symptoms, causes, which tests showed what.
+
+---
+
+### Concept 1 — Prometheus
+
+#### What It Is
+
+Prometheus is an open-source **time-series metrics database** that runs **inside your Kubernetes cluster**. It uses a **pull model** — every 15 seconds it visits each service's `/metrics` endpoint and reads the numbers.
+
+#### What It Stores
+
+Prometheus only stores **numbers with timestamps and labels**. Nothing else.
+
+```
+# At time 14:32:00
+http_requests_total{service="user-service", status_code="200"} = 12450
+http_requests_total{service="user-service", status_code="500"} = 23
+http_request_duration_seconds_p95{service="user-service"}      = 0.342
+
+# At time 14:32:15 (15 seconds later)
+http_requests_total{service="user-service", status_code="200"} = 12467
+```
+
+It does NOT store the text of what went wrong, stack traces, request bodies, or who made the request. Just numbers, timestamps, and labels.
+
+#### Where Prometheus Is Used in AzureShop
+
+Every service exposes metrics at `/metrics` via `telemetry.js` / `telemetry.py`:
+```
+http_requests_total           ← counter: total requests by method/route/status
+http_request_duration_seconds ← histogram: request duration distribution
+```
+
+The Helm deployment annotations tell Prometheus to scrape each pod:
+```yaml
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "3001"
+  prometheus.io/path: "/metrics"
+```
+
+The 10 PrometheusRule alerts in `k8s/alert-rules/azureshop-alerts.yaml` evaluate Prometheus data every minute. Grafana reads from Prometheus to draw the request rate, error rate, and P95 latency panels.
+
+#### PromQL Examples
+
+```promql
+# Error rate for user-service
+rate(http_requests_total{service="user-service",status_code=~"5.."}[5m])
+/
+rate(http_requests_total{service="user-service"}[5m])
+
+# P95 latency for all services
+histogram_quantile(0.95,
+  sum(rate(http_request_duration_seconds_bucket[5m])) by (service, le)
+)
+```
+
+#### Prometheus Strengths and Weaknesses
+
+| Strengths | Weaknesses |
+|---|---|
+| Extremely fast for number queries | No text — cannot store log messages |
+| Perfect for alerting on thresholds | Short retention (days/weeks by default) |
+| Native Kubernetes integration | No cross-service distributed tracing |
+| Powers HPA autoscaling | No Azure resource visibility |
+| Open source — free | Requires `/metrics` endpoint on every service |
+
+---
+
+### Concept 2 — Log Analytics
+
+#### What It Is
+
+Log Analytics Workspace is **Azure's centralised log database** — a managed service where every Azure resource sends its logs. You create it with Terraform and point other resources at it. It is NOT something you install in your cluster.
+
+#### What It Stores
+
+Log Analytics stores **structured and unstructured text data** with timestamps:
+
+```
+TimeGenerated          | Type          | Message
+-----------------------|---------------|------------------------------------------
+2026-05-28 14:32:01    | ContainerLog  | [user-service] ERROR: DB Timeout after 30s
+2026-05-28 14:32:10    | AzureActivity | WAF policy blocked request from 203.0.113.1
+2026-05-28 14:32:15    | AzureDiag    | SQL query took 4821ms — threshold exceeded
+2026-05-28 14:32:20    | KeyVaultLog  | Secret 'sql-admin-password' read by identity X
+```
+
+#### What Sends Data to Log Analytics in AzureShop
+
+```
+AKS Container Insights   → pod logs, node metrics
+Application Insights ×8  → requests, exceptions, traces
+Application Gateway      → WAF logs, access logs
+Azure SQL                → slow queries, errors
+Key Vault                → every secret access
+Azure Monitor            → resource health events
+```
+
+All of these feed into ONE workspace — when something goes wrong, you query ONE place.
+
+#### KQL Examples
+
+```kusto
+-- Find all pod crashes in the last 24 hours
+ContainerLog
+| where TimeGenerated > ago(24h)
+| where LogEntry contains "CrashLoopBackOff" or LogEntry contains "OOMKilled"
+| project TimeGenerated, ContainerName, LogEntry
+| order by TimeGenerated desc
+
+-- Find who accessed Key Vault secrets in the last 7 days
+AzureDiagnostics
+| where TimeGenerated > ago(7d)
+| where ResourceType == "VAULTS"
+| where OperationName == "SecretGet"
+| project TimeGenerated, CallerIPAddress, id_s
+```
+
+#### Log Analytics Strengths and Weaknesses
+
+| Strengths | Weaknesses |
+|---|---|
+| Sees ALL Azure resources in one place | Not real-time — slight ingestion delay (2-5 min) |
+| Long retention (30-730 days) | Cost increases fast with high log volume |
+| Powerful KQL for complex queries | No distributed tracing |
+| Compliance and full audit trail | Requires KQL knowledge |
+| Azure-native — no setup per resource | — |
+
+---
+
+### Concept 3 — Application Insights
+
+#### What It Is
+
+Application Insights is **APM — Application Performance Monitoring**. It is an SDK that lives **inside your application code** and tracks what the application does at the code level. Unlike Prometheus (scraped from outside) and Log Analytics (resources push to it), App Insights runs **as part of your application process**.
+
+#### What It Stores
+
+App Insights stores **application-level telemetry** — rich, structured data about every operation your code performs:
+
+```
+Request:
+  url: POST /auth/login
+  duration: 342ms
+  responseCode: 200
+  operationId: abc123          ← correlation ID
+
+Dependency (called by that request):
+  type: SQL
+  name: SELECT * FROM users WHERE email = ?
+  duration: 310ms              ← 310ms of the 342ms was the DB query!
+  operationId: abc123          ← same correlation ID — they are linked
+
+Exception:
+  type: TypeError
+  message: Cannot read property 'id' of undefined
+  stack: at /app/src/routes/auth.js:42:15
+```
+
+#### The Killer Feature — Distributed Tracing
+
+When user-service calls order-service which calls payment-service, App Insights links all those calls together using a **correlation ID** injected into HTTP headers:
+
+```
+User places order → 1 request spanning 4 services:
+
+[frontend]          200ms total
+  └── [api-gateway]    195ms
+        └── [order-service]  180ms
+              ├── [SQL query]         12ms
+              ├── [payment-service]  145ms
+              │     └── [SQL query]    8ms
+              └── [notification]      3ms
+```
+
+Without distributed tracing: 4 separate unconnected requests. With it: the full tree — instantly see payment-service SQL is the bottleneck.
+
+#### Where App Insights Is Used in AzureShop
+
+```
+services/user-service/src/telemetry.js     ← Node.js SDK (monkey-patches Express, mssql, Redis)
+services/product-service/app/telemetry.py  ← Python OpenTelemetry + FastAPIInstrumentor
+... all 8 services
+```
+
+Connection string flows: `Terraform → Key Vault → CSI Driver → Pod env var → SDK starts`
+
+#### App Insights Strengths and Weaknesses
+
+| Strengths | Weaknesses |
+|---|---|
+| Distributed tracing across services | Requires SDK in every service |
+| Full stack traces on exceptions | Language-specific SDKs |
+| Dependency tracking (DB, Redis, HTTP) | Cost scales with request volume |
+| Application Map — visual service graph | Not for infrastructure metrics |
+| No code needed for basic tracking | — |
+
+---
+
+### Side-by-Side Comparison — The Full Picture
+
+| | Prometheus | Log Analytics | Application Insights |
+|---|---|---|---|
+| **What it stores** | Numbers (metrics) | Text (logs, events) | App behaviour (requests, traces, exceptions) |
+| **Where it runs** | Inside AKS cluster | Azure managed service | Inside your app code (SDK) |
+| **Data source** | Pulls from `/metrics` endpoint | Resources push to it | SDK pushes from inside app |
+| **Query language** | PromQL | KQL | KQL (same as Log Analytics) |
+| **Best for** | Alerting, dashboards, autoscaling | Audit, compliance, cross-resource investigation | Debugging, tracing, exception analysis |
+| **Retention** | Days (short) | 30-730 days | 90 days default |
+| **Distributed tracing** | No | No | Yes |
+| **Azure resource visibility** | No (cluster only) | Yes (all Azure) | No (app only) |
+| **Real-time** | Yes (15s scrape) | Slight delay (2-5 min) | Near real-time |
+| **Cost** | Free (self-hosted) | Pay per GB ingested | Pay per GB ingested |
+
+---
+
+### How They Work Together in AzureShop — The Three Layers
+
+```
+LAYER 1: INFRASTRUCTURE METRICS (Prometheus)
+─────────────────────────────────────────────
+What:    Numbers from pods and cluster
+Where:   Inside AKS, scraped from /metrics every 15s
+Used for: 10 PrometheusRule alerts, Grafana dashboards, HPA autoscaling
+Example: "user-service error rate > 5% for 5 minutes" → alert fires
+
+LAYER 2: APPLICATION BEHAVIOUR (Application Insights)
+──────────────────────────────────────────────────────
+What:    Requests, exceptions, dependencies, distributed traces
+Where:   SDK inside each service process
+Used for: Debugging failures, finding slow DB queries, tracing requests
+Example: "Checkout failing — App Insights shows payment SQL timed out"
+
+LAYER 3: AUDIT AND PLATFORM LOGS (Log Analytics)
+─────────────────────────────────────────────────
+What:    All logs from all Azure resources in one place
+Where:   Azure managed — all resources configured to send here
+Used for: Security audits, compliance, cross-resource debugging
+Example: "Which IP triggered the WAF rule?" → KQL on AzureDiagnostics
+```
+
+---
+
+### The SRE Decision Flow — Which Tool When
+
+```
+STEP 1: Alert fires (Prometheus)
+        "HighErrorRate: user-service 5xx > 5% for 5 minutes"
+                │
+                ▼
+STEP 2: Check Grafana (Prometheus data)
+        "Error rate spiked at 14:30, latency also went up"
+                │
+                ▼
+STEP 3: Application Insights
+        "47 TypeErrors at /auth/login — SQL connection refused at auth.js:42"
+        → Now you know WHAT failed and WHERE in the code
+                │
+                ▼
+STEP 4: Log Analytics if needed
+        "Was this a deploy? Did a node go down? Did WAF block something?"
+        KQL: ContainerLog | where LogEntry contains "Error"
+                │
+                ▼
+STEP 5: Fix and verify
+        Deploy fix → watch Grafana → confirm error rate drops to 0%
+```
+
+---
+
+### Real Scenarios From AzureShop
+
+**Scenario 1 — Cart Service Slow**
+```
+Prometheus:       HighP95Latency alert fires — cart-service P95 > 1s
+Grafana:          Latency spiked at 14:45, memory also rising
+App Insights:     /cart/add — Redis GET taking 800ms (normally 2ms)
+Log Analytics:    Azure Redis diagnostics — memory at 95%, evicting keys
+Fix:              Increase Redis cache size in Terraform
+```
+
+**Scenario 2 — Payment Error After Deploy**
+```
+Prometheus:       HighErrorRate alert fires — payment-service 5xx > 5%
+App Insights:     TypeError at payment.js:89 — started exactly at 15:00 deploy
+Fix:              Roll back Helm chart to previous version
+Grafana confirms: Error rate back to 0% within 2 minutes
+```
+
+**Scenario 3 — Security Audit**
+```
+No alert — but compliance audit required
+Log Analytics KQL: Who read sql-admin-password in the last 30 days?
+                   AzureDiagnostics | where OperationName == "SecretGet"
+Result:            Only CSI Driver identity accessed it — no anomalies
+```
+
+---
+
+### Which Tool to Use — Quick Reference
+
+| Question | Tool |
+|---|---|
+| Alert fires — something is wrong | Prometheus (threshold breach) |
+| What is the current error rate? | Prometheus / Grafana |
+| Which exact exception is causing errors? | Application Insights — Failures tab |
+| Which database query is slow? | Application Insights — dependency tracking |
+| How did a request flow across all services? | Application Insights — distributed tracing |
+| What happened on the AKS nodes at 14:30? | Log Analytics — ContainerLog |
+| Did the WAF block any legitimate traffic? | Log Analytics — AzureDiagnostics |
+| Who accessed Key Vault secrets? | Log Analytics — KeyVaultLog |
+| Is memory approaching the limit? | Prometheus — HighMemoryUsage alert |
+
+---
+
+### Interview Answer
+
+**Q: What is the difference between Prometheus, Log Analytics, and Application Insights?**
+
+> "They solve three different problems. Prometheus is a time-series metrics database that runs inside the AKS cluster. It scrapes numbers from our `/metrics` endpoints every 15 seconds — request rate, error rate, latency percentiles, CPU, memory. It powers our 10 PrometheusRule alerts and Grafana dashboards. It is fast and perfect for alerting on threshold breaches, but it stores only numbers, has no distributed tracing, and cannot see outside the cluster.
+>
+> Log Analytics is Azure's centralised log store. Every Azure resource — AKS, App Insights, SQL, Key Vault, Application Gateway — sends its logs there. We query it with KQL. It is the single source of truth for audit trails, compliance, and cross-resource debugging. When we need to know what happened across the entire platform — who accessed Key Vault, what the WAF blocked, what a node was doing during an incident — Log Analytics is the answer.
+>
+> Application Insights is APM — it lives as an SDK inside each microservice. We initialise it in `telemetry.js` before any other code loads so it can monkey-patch Express, mssql, and Redis to automatically track every request, database call, and exception. Its killer feature is distributed tracing — it injects correlation IDs into outgoing HTTP headers so we can trace one user request across all 8 services and see exactly which call in the chain was slow or failed.
+>
+> In AzureShop, when an alert fires in Prometheus, we check Grafana to understand scope, App Insights to find the exact failure and stack trace, and Log Analytics if we need cross-resource context. The three tools form a complete observability stack — metrics, logs, and traces."
