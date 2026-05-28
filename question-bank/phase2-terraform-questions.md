@@ -27,6 +27,7 @@ Covers: Terraform state, locking, variables, locals, sensitive values, NSG, ASG,
 18. [How Does the Full Key Vault Secrets Flow Work — From Storage to Running Pod?](#q18-how-does-the-full-key-vault-secrets-flow-work--from-storage-to-running-pod)
 19. [Module 5 Key Vault — RBAC, Roles, Role Assignments, and All Core Concepts Explained](#q19-module-5-key-vault--rbac-roles-role-assignments-and-all-core-concepts-explained)
 20. [What is network_acls — Is It the Same as AWS NACL?](#q20-what-is-network_acls--is-it-the-same-as-aws-nacl)
+21. [Module 6 Application Gateway and WAF — Full Working Concept Explained](#q21-module-6-application-gateway-and-waf--full-working-concept-explained)
 
 ---
 
@@ -2917,3 +2918,432 @@ This is **defence in depth** — two independent security controls. Even if one 
 **Q: What is network_acls in Azure Key Vault and how is it different from AWS NACL?**
 
 > "In Azure, `network_acls` is a per-resource firewall configuration block — it lives inside resources like Key Vault or Storage Account and controls which IPs or VNets can reach that specific resource. It is NOT the same as AWS NACL. AWS NACL is a subnet-level firewall — a standalone resource that controls all traffic going in and out of an entire subnet. The Azure equivalent of AWS NACL is an NSG (Network Security Group), which is also subnet or NIC-level but stateful unlike AWS NACL which is stateless. In our Key Vault module, we use network_acls with `default_action = Deny` in production and `bypass = AzureServices` to always allow trusted Azure services like Pipelines and Monitor. This works alongside RBAC as a two-layer security model — network_acls controls whether the traffic can reach Key Vault at all, and RBAC controls whether the identity has permission to read the secret."
+
+---
+
+## Q21. Module 6 Application Gateway and WAF — Full Working Concept Explained
+
+### The Big Picture — Why Do We Need Application Gateway?
+
+Your AzureShop has 8 microservices running inside AKS (a private Kubernetes cluster). The cluster is inside a private VNet — no direct public internet access.
+
+Users on the internet need to reach your app. So you need something that sits between the internet and your private cluster, receives all incoming traffic, inspects it for attacks, and forwards it safely to the right service.
+
+That is exactly what **Application Gateway** does.
+
+```
+Internet
+   │
+   ▼
+Application Gateway (public IP — WAF inspects ALL traffic here)
+   │
+   ▼
+AKS Ingress Controller (NGINX — routes to correct service)
+   │
+   ▼
+Kubernetes Service → Pod (your actual application)
+```
+
+**Application Gateway is the front door of the entire system.**
+
+---
+
+### Concept 1 — Application Gateway vs Load Balancer vs NGINX Ingress
+
+Three routing layers exist in our system and each does a different job:
+
+| Layer | What It Is | Works At | Knows About |
+|---|---|---|---|
+| **Application Gateway** | Azure-managed reverse proxy + WAF | Layer 7 (HTTP/HTTPS) | URLs, hostnames, SSL certs, WAF rules |
+| **Azure Load Balancer** | Azure-managed TCP/UDP balancer | Layer 4 (TCP/IP) | IP addresses and ports only |
+| **NGINX Ingress** | Kubernetes-managed reverse proxy | Layer 7 (HTTP) | Kubernetes services, path routing |
+
+**Why do we need both Application Gateway AND NGINX Ingress?**
+
+- Application Gateway handles: public internet traffic, SSL termination, WAF security inspection, DoS protection
+- NGINX Ingress handles: internal Kubernetes routing — which service gets `/api/products`, which gets `/api/users`
+
+They complement each other. Application Gateway is the security gate at the front. NGINX Ingress is the internal traffic director inside the cluster.
+
+**Analogy:** Application Gateway is the security checkpoint at the airport entrance (checks everyone). NGINX Ingress is the gate agents inside (direct you to gate A3 vs B12).
+
+---
+
+### Concept 2 — The locals Block
+
+```hcl
+locals {
+  frontend_ip_name         = "appgw-frontend-ip"
+  frontend_port_http_name  = "port-80"
+  frontend_port_https_name = "port-443"
+  backend_pool_name        = "aks-backend-pool"
+  backend_settings_name    = "aks-backend-settings"
+  http_listener_name       = "http-listener"
+  https_listener_name      = "https-listener"
+  redirect_rule_name       = "http-to-https-redirect"
+  https_routing_rule_name  = "https-routing-rule"
+  redirect_config_name     = "http-to-https-redirect-config"
+  ssl_cert_name            = "appgw-ssl-cert"
+}
+```
+
+Application Gateway is unique in Terraform — its internal components (listeners, pools, rules) **reference each other by string name**, not by resource ID. If you type the name wrong in two places, Terraform applies fine but the gateway is misconfigured at runtime.
+
+Using `locals` solves this — define the name once, reference `local.frontend_ip_name` everywhere. If you need to rename, change it in one place. No typos possible.
+
+---
+
+### Concept 3 — Public IP
+
+```hcl
+resource "azurerm_public_ip" "appgw" {
+  allocation_method = "Static"   # Must be Static for Application Gateway
+  sku               = "Standard" # Must be Standard to match WAF_v2 SKU
+}
+```
+
+This is the **public IP address of the Application Gateway** — the address users type in their browser or that DNS points to.
+
+**Why Static?** Dynamic IPs change every time the resource restarts, breaking DNS. Application Gateway requires Static — Azure reserves a fixed IP permanently.
+
+**Why Standard SKU?** WAF_v2 Application Gateway requires Standard SKU for its public IP. They must match. Basic SKU causes a Terraform SKU mismatch error.
+
+---
+
+### Concept 4 — WAF (Web Application Firewall)
+
+WAF stands for **Web Application Firewall**. It inspects every HTTP/HTTPS request coming into your application and blocks malicious ones before they ever reach your code.
+
+**Analogy:** Think of it as a security scanner at the airport. Every passenger (HTTP request) goes through it. Normal passengers pass. Passengers carrying weapons (SQL injection, XSS attacks) are stopped.
+
+```hcl
+resource "azurerm_web_application_firewall_policy" "main" {
+  managed_rules {
+    managed_rule_set {
+      type    = "OWASP"
+      version = "3.2"
+    }
+    managed_rule_set {
+      type    = "Microsoft_BotManagerRuleSet"
+      version = "1.0"
+    }
+  }
+
+  policy_settings {
+    enabled                     = true
+    mode                        = var.waf_mode
+    request_body_check          = true
+    file_upload_limit_in_mb     = 100
+    max_request_body_size_in_kb = 128
+  }
+}
+```
+
+#### What is OWASP?
+
+**OWASP = Open Web Application Security Project** — a non-profit organisation that maintains a list of the most dangerous web application vulnerabilities. The **OWASP Core Rule Set (CRS)** is the gold standard rulebook for blocking web attacks.
+
+| Attack | What It Does | Example |
+|---|---|---|
+| **SQL Injection** | Attacker puts SQL code in a form field to steal/delete your database | `'; DROP TABLE users; --` |
+| **XSS (Cross-Site Scripting)** | Attacker injects JavaScript into your page to steal cookies | `<script>steal(document.cookie)</script>` |
+| **Command Injection** | Attacker runs OS commands through your app | `; rm -rf /` |
+| **Path Traversal** | Attacker navigates to files outside the web root | `../../etc/passwd` |
+
+We use **OWASP CRS version 3.2** — hundreds of rules, each detecting a specific attack pattern. Microsoft maintains and updates these rules regularly.
+
+#### Microsoft Bot Manager
+
+Bots are automated scripts that try thousands of username/password combinations (credential stuffing), scrape your product data, or perform DDoS attacks. Microsoft maintains a list of known malicious bot signatures — Bot Manager blocks these automatically without you writing any rules.
+
+#### WAF Modes — Detection vs Prevention
+
+| Mode | What It Does | Use When |
+|---|---|---|
+| **Detection** | Logs suspicious requests but does NOT block them | Testing — see what WAF would block without breaking the app |
+| **Prevention** | Logs AND blocks suspicious requests | Production — actually stops attacks |
+
+**Why start with Detection?** Sometimes OWASP rules are too aggressive — they block legitimate traffic (false positives). Detection mode lets you identify these before switching to Prevention. In our project, `var.waf_mode` defaults to `"Prevention"`.
+
+#### request_body_check = true
+
+WAF inspects not just the URL but the full HTTP request body (form data, JSON payloads). This catches attacks hidden in POST request bodies.
+
+#### file_upload_limit_in_mb = 100
+
+Any file upload larger than 100MB is automatically rejected — prevents DoS attacks via huge uploads and blocks malicious file uploads.
+
+---
+
+### Concept 5 — Application Gateway SKU and Autoscaling
+
+```hcl
+sku {
+  name = "WAF_v2"
+  tier = "WAF_v2"
+}
+
+autoscale_configuration {
+  min_capacity = var.capacity   # 1 for dev, 2 for prod
+  max_capacity = 5
+}
+```
+
+| SKU | Features | Use Case |
+|---|---|---|
+| **Standard_v2** | Layer 7 routing, SSL termination, autoscaling | No WAF needed |
+| **WAF_v2** | Everything in Standard_v2 + WAF + Bot protection | Production — security required |
+
+**WAF_v2 autoscales automatically.** Old v1 had fixed capacity — you paid for 2 instances always. WAF_v2 scales 1→5 instances based on traffic. `min_capacity = 2` in production ensures high availability — if one instance fails, the other handles traffic while a replacement starts.
+
+---
+
+### Concept 6 — The Full Traffic Flow Inside Application Gateway
+
+Application Gateway has 5 internal components that work as a pipeline:
+
+```
+Internet request arrives
+        │
+        ▼
+┌─────────────────────┐
+│  1. Public IP       │  Fixed IP — DNS points here
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│  2. Listener        │  "Watching port 80/443 for HTTP/HTTPS traffic"
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│  3. WAF Inspection  │  "Is this request safe? Check OWASP rules"
+└──────────┬──────────┘
+           │ (passes inspection)
+           ▼
+┌─────────────────────┐
+│  4. Routing Rule    │  "Which backend pool handles this request?"
+└──────────┬──────────┘
+           ▼
+┌─────────────────────┐
+│  5. Backend Pool    │  "Forward to AKS ingress controller IP"
+│  + HTTP Settings    │
+└─────────────────────┘
+```
+
+---
+
+### Concept 7 — Gateway IP Configuration
+
+```hcl
+gateway_ip_configuration {
+  name      = "appgw-ip-config"
+  subnet_id = var.appgw_subnet_id
+}
+```
+
+Application Gateway **lives inside your VNet in a dedicated subnet**. This subnet must be exclusively for Application Gateway — no other resources allowed. Minimum /26 (64 IPs) recommended for WAF_v2 with autoscaling. The subnet ID comes from our networking module.
+
+---
+
+### Concept 8 — Frontend IP and Ports
+
+```hcl
+frontend_ip_configuration {
+  name                 = local.frontend_ip_name
+  public_ip_address_id = azurerm_public_ip.appgw.id
+}
+
+frontend_port { name = local.frontend_port_http_name  port = 80  }
+frontend_port { name = local.frontend_port_https_name port = 443 }
+```
+
+These define WHAT the Application Gateway listens on — which IP and which ports. These are just definitions. The actual behaviour is determined by the Listeners that reference them.
+
+---
+
+### Concept 9 — Listeners
+
+```hcl
+http_listener {
+  name                           = local.http_listener_name
+  frontend_ip_configuration_name = local.frontend_ip_name
+  frontend_port_name             = local.frontend_port_http_name
+  protocol                       = "Http"
+}
+```
+
+A **Listener** watches the public IP on a specific port for incoming traffic. When a request comes in on port 80, this listener picks it up and hands it to the routing rule.
+
+**Why is the HTTPS listener commented out?** An HTTPS listener requires an SSL certificate. For dev we don't have a real SSL cert (requires a real domain). For production, uncomment and attach a real certificate from Key Vault.
+
+---
+
+### Concept 10 — SSL Termination
+
+**Without SSL Termination:**
+```
+Client ──HTTPS──► App Gateway ──HTTPS──► AKS ──HTTPS──► Pod
+```
+Every hop does SSL encryption/decryption — expensive CPU work at every layer.
+
+**With SSL Termination (what we do):**
+```
+Client ──HTTPS──► App Gateway ──HTTP──► AKS ──HTTP──► Pod
+```
+
+Application Gateway **terminates** (ends) the SSL connection. It decrypts HTTPS traffic, inspects it (WAF can only inspect decrypted traffic), then forwards clean traffic to AKS over plain HTTP **inside the private VNet**. Internal VNet traffic is safe — it's not the public internet.
+
+```hcl
+backend_http_settings {
+  port     = 80      # AppGW → AKS uses HTTP internally
+  protocol = "Http"  # SSL already terminated at AppGW
+}
+```
+
+**Benefits:** WAF can inspect decrypted content, pods don't handle SSL, certificates managed in one place.
+
+---
+
+### Concept 11 — Backend Pool
+
+```hcl
+backend_address_pool {
+  name         = local.backend_pool_name
+  ip_addresses = var.aks_ingress_ip != "" ? [var.aks_ingress_ip] : []
+}
+```
+
+The **Backend Pool** is the list of servers Application Gateway forwards traffic to — in our case the **private IP of the AKS NGINX Ingress Controller**.
+
+`var.aks_ingress_ip != "" ? [var.aks_ingress_ip] : []` is a Terraform conditional that solves a **circular dependency** problem:
+
+1. Terraform creates AKS → AKS must be deployed to get the Ingress IP → Application Gateway needs the Ingress IP to set the backend pool
+2. Solution: deploy Application Gateway first with an empty pool. After AKS deploys and NGINX Ingress gets its IP, run `terraform apply` again — it updates the pool with the real IP.
+
+---
+
+### Concept 12 — Backend HTTP Settings
+
+```hcl
+backend_http_settings {
+  cookie_based_affinity               = "Disabled"  # No sticky sessions — app is stateless
+  port                                = 80
+  protocol                            = "Http"
+  request_timeout                     = 30          # 504 after 30s if backend doesn't respond
+  pick_host_name_from_backend_address = false        # Keep original Host header for NGINX routing
+}
+```
+
+**cookie_based_affinity = "Disabled"** — Sticky sessions send the same user to the same backend server via a cookie. We disable this because our app is stateless — any pod handles any request. AKS already handles load balancing internally.
+
+**request_timeout = 30** — If AKS doesn't respond within 30 seconds, Application Gateway returns 504 Gateway Timeout. Prevents requests from hanging forever.
+
+**pick_host_name_from_backend_address = false** — We keep the original `Host` header from the client's request. NGINX Ingress uses the `Host` header to route to the correct service — replacing it with the backend IP would break NGINX routing.
+
+---
+
+### Concept 13 — Routing Rules
+
+```hcl
+request_routing_rule {
+  name                       = local.https_routing_rule_name
+  rule_type                  = "Basic"
+  http_listener_name         = local.http_listener_name
+  backend_address_pool_name  = local.backend_pool_name
+  backend_http_settings_name = local.backend_settings_name
+  priority                   = 100
+}
+```
+
+A **Routing Rule** connects a Listener to a Backend Pool:
+
+```
+Listener (receives traffic on port 80)
+    │
+    ▼
+Routing Rule: "take traffic from this listener → send to this backend pool"
+    │
+    ▼
+Backend Pool (AKS Ingress IP)
+```
+
+**rule_type = "Basic"** — All traffic from the listener goes to one backend pool. (`PathBased` would route different URL paths to different backends — but we let NGINX Ingress handle that inside AKS.)
+
+**priority = 100** — When multiple rules exist, lower number = higher priority. Evaluated first. Only one rule here, so 100 is fine.
+
+---
+
+### The Complete End-to-End Traffic Flow
+
+```
+USER BROWSER
+types: http://azureshop.com/api/products
+           │
+           ▼
+┌──────────────────────────────────────────────────────────┐
+│  PUBLIC IP: 20.x.x.x (pip-appgw-azureshop-dev)          │
+└───────────────────────┬──────────────────────────────────┘
+                        │ Port 80 HTTP
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│  LISTENER: http-listener                                 │
+│  "I got an HTTP request on port 80"                      │
+└───────────────────────┬──────────────────────────────────┘
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│  WAF INSPECTION (OWASP 3.2 + Bot Manager)               │
+│  Is this SQL injection? No → pass                        │
+│  Is this XSS? No → pass                                 │
+│  Is this a known malicious bot? No → pass               │
+└───────────────────────┬──────────────────────────────────┘
+                        │ Request is clean
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│  ROUTING RULE: https-routing-rule (priority 100)        │
+│  "Send to aks-backend-pool using aks-backend-settings"  │
+└───────────────────────┬──────────────────────────────────┘
+                        │ Forward over HTTP (SSL terminated)
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│  BACKEND POOL: AKS Ingress IP (10.0.3.x)                │
+│  NGINX Ingress Controller receives the request          │
+└───────────────────────┬──────────────────────────────────┘
+                        ▼
+┌──────────────────────────────────────────────────────────┐
+│  NGINX INGRESS ROUTING                                  │
+│  /api/products → product-service                        │
+│  /api/users    → user-service                           │
+│  /*            → frontend                               │
+└───────────────────────┬──────────────────────────────────┘
+                        ▼
+                    YOUR POD
+```
+
+---
+
+### Summary — All Concepts in One Table
+
+| Concept | What It Is | Our Usage |
+|---|---|---|
+| **Application Gateway** | Azure Layer 7 reverse proxy + WAF | Single entry point for all internet traffic |
+| **WAF** | Web Application Firewall — blocks attacks | OWASP 3.2 + Bot Manager |
+| **OWASP CRS** | Standard rulebook for blocking web attacks | SQL injection, XSS, path traversal, etc. |
+| **WAF_v2 SKU** | Gateway SKU that includes WAF + autoscaling | Only SKU that supports WAF |
+| **Prevention mode** | Blocks malicious requests | Production default |
+| **Detection mode** | Logs but does not block | Used when tuning WAF rules |
+| **SSL Termination** | AppGW decrypts HTTPS, forwards HTTP internally | Pods don't handle SSL, WAF can inspect |
+| **Listener** | Watches a port for incoming traffic | HTTP on 80, HTTPS on 443 (when cert added) |
+| **Backend Pool** | Target servers to forward traffic to | AKS NGINX Ingress private IP |
+| **Routing Rule** | Connects listener → backend pool | Basic rule — all traffic to AKS |
+| **cookie_based_affinity** | Sticky sessions | Disabled — app is stateless |
+| **Autoscaling** | Scales 1→5 instances automatically | WAF_v2 feature, no fixed capacity |
+| **locals** | Named string constants | Avoids typos in cross-component name references |
+| **Static Public IP** | Fixed IP for DNS | Required by Application Gateway |
+| **Bot Manager** | Blocks known malicious bots | Microsoft-maintained bot list |
+
+---
+
+### Interview Answer
+
+**Q: Explain Application Gateway and WAF in your project.**
+
+> "Application Gateway is the single entry point for all internet traffic to AzureShop. It sits in a dedicated subnet inside our VNet with a public static IP that DNS points to. We use the WAF_v2 SKU which includes a Web Application Firewall — it inspects every HTTP request against OWASP Core Rule Set 3.2 rules before the request reaches AKS. OWASP rules detect SQL injection, XSS, command injection, path traversal, and more. We also enable the Microsoft Bot Manager ruleset to block known malicious bots. The WAF runs in Prevention mode in production — it actively blocks threats, not just logs them. Application Gateway performs SSL termination: it decrypts HTTPS traffic, WAF inspects the decrypted content, then forwards clean traffic to the AKS NGINX Ingress Controller over plain HTTP inside the private VNet. The backend pool points to the private IP of the NGINX Ingress. WAF_v2 autoscales from 1 to 5 instances based on traffic. Inside the cluster, NGINX Ingress handles path-based routing to the correct microservice."
