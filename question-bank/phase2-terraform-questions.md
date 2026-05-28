@@ -28,6 +28,7 @@ Covers: Terraform state, locking, variables, locals, sensitive values, NSG, ASG,
 19. [Module 5 Key Vault — RBAC, Roles, Role Assignments, and All Core Concepts Explained](#q19-module-5-key-vault--rbac-roles-role-assignments-and-all-core-concepts-explained)
 20. [What is network_acls — Is It the Same as AWS NACL?](#q20-what-is-network_acls--is-it-the-same-as-aws-nacl)
 21. [Module 6 Application Gateway and WAF — Full Working Concept Explained](#q21-module-6-application-gateway-and-waf--full-working-concept-explained)
+22. [Module 7 Monitoring — Log Analytics, App Insights, Grafana, Prometheus, SLIs, SLOs, and Error Budgets](#q22-module-7-monitoring--log-analytics-app-insights-grafana-prometheus-slis-slos-and-error-budgets)
 
 ---
 
@@ -3347,3 +3348,556 @@ types: http://azureshop.com/api/products
 **Q: Explain Application Gateway and WAF in your project.**
 
 > "Application Gateway is the single entry point for all internet traffic to AzureShop. It sits in a dedicated subnet inside our VNet with a public static IP that DNS points to. We use the WAF_v2 SKU which includes a Web Application Firewall — it inspects every HTTP request against OWASP Core Rule Set 3.2 rules before the request reaches AKS. OWASP rules detect SQL injection, XSS, command injection, path traversal, and more. We also enable the Microsoft Bot Manager ruleset to block known malicious bots. The WAF runs in Prevention mode in production — it actively blocks threats, not just logs them. Application Gateway performs SSL termination: it decrypts HTTPS traffic, WAF inspects the decrypted content, then forwards clean traffic to the AKS NGINX Ingress Controller over plain HTTP inside the private VNet. The backend pool points to the private IP of the NGINX Ingress. WAF_v2 autoscales from 1 to 5 instances based on traffic. Inside the cluster, NGINX Ingress handles path-based routing to the correct microservice."
+
+---
+
+## Q22. Module 7 Monitoring — Log Analytics, App Insights, Grafana, Prometheus, SLIs, SLOs, and Error Budgets
+
+### The Big Picture — Why Monitoring Matters
+
+You have deployed AzureShop. Everything looks fine. But how do you KNOW it is fine?
+
+- Is the user-service responding in under 200ms?
+- Is the payment-service throwing errors that users never report?
+- Is a pod silently running out of memory and about to crash?
+- Did the deploy 10 minutes ago break something?
+
+Without monitoring, you are **flying blind**. You only find out something is wrong when a user complains — which means it was broken for minutes or hours before you knew.
+
+Monitoring gives you **eyes inside your system at all times**. This is the core job of an SRE — you don't just build and deploy, you watch, measure, and ensure reliability.
+
+---
+
+### The Three Pillars of Observability
+
+Modern monitoring is built on three types of data. Together they are called **Observability**:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│              THE THREE PILLARS OF OBSERVABILITY         │
+│                                                         │
+│  LOGS          METRICS         TRACES                   │
+│  ──────        ───────         ──────                   │
+│  What          How many        Why (the path)           │
+│  happened      / how fast                               │
+│                                                         │
+│  "Error:       requests/sec    Request A went           │
+│  DB timeout    latency P95     user-service →           │
+│  at 14:32"     memory %        order-service →          │
+│                error rate      payment-service          │
+│                                took 2.3s total          │
+│                                                         │
+│  Azure: Log    Azure: App      Azure: App               │
+│  Analytics     Insights /      Insights                 │
+│                Prometheus      (distributed             │
+│                                tracing)                 │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Logs** — Text events that happened. Full story of what happened with timestamps.
+
+**Metrics** — Numbers over time. Request rate, error rate, latency, CPU usage. Used to detect trends and trigger alerts.
+
+**Traces** — The journey of a single request through multiple services. Shows WHICH service was slow, WHICH call failed in a chain.
+
+**Rule of thumb:** Metrics tell you SOMETHING is wrong. Logs tell you WHAT happened. Traces show you WHERE in the call chain the problem is.
+
+---
+
+### Resource 1 — Log Analytics Workspace
+
+```hcl
+resource "azurerm_log_analytics_workspace" "main" {
+  name              = "law-${var.project}-${var.environment}"
+  sku               = "PerGB2018"
+  retention_in_days = var.log_retention_days   # 30 days dev, 90 days prod
+}
+```
+
+#### What is Log Analytics Workspace?
+
+Think of Log Analytics Workspace as a **massive centralised database for logs and metrics from every Azure resource**.
+
+Without it, each resource keeps its own logs locally — AKS logs here, App Insights logs there, SQL logs somewhere else. You would have to check 10 different places when debugging. Log Analytics pulls ALL logs into one place.
+
+#### What Goes Into It?
+
+| Source | What It Sends |
+|---|---|
+| **AKS (Container Insights)** | Pod logs, node metrics, container CPU/memory |
+| **Application Insights** | Request traces, exceptions, custom events, dependencies |
+| **Azure SQL** | Query performance, slow queries, deadlocks |
+| **Application Gateway** | WAF logs, access logs, health probe results |
+| **Key Vault** | Every secret access — who read what and when |
+
+#### KQL — The Query Language
+
+Log Analytics uses **KQL (Kusto Query Language)** to query logs. As an SRE, you use this daily.
+
+```kusto
+-- Find all 5xx errors from user-service in the last hour
+requests
+| where timestamp > ago(1h)
+| where cloud_RoleName == "user-service"
+| where resultCode >= 500
+| summarize count() by bin(timestamp, 5m), resultCode
+| render timechart
+```
+
+```kusto
+-- Find pod crashes in the last 24 hours
+ContainerLog
+| where TimeGenerated > ago(24h)
+| where LogEntry contains "OOMKilled" or LogEntry contains "Error"
+| project TimeGenerated, ContainerName, LogEntry
+| order by TimeGenerated desc
+```
+
+#### SKU = "PerGB2018"
+
+You pay per GB of data ingested. Standard pay-as-you-go model. The alternative is Capacity Reservation (fixed price per day) — only worth it above ~100GB/day.
+
+#### retention_in_days
+
+- **Dev: 30 days** — old logs not needed long-term in dev, saves cost
+- **Prod: 90 days** — logs kept longer for debugging, compliance, auditing
+
+After the retention period, logs are automatically deleted. For longer retention (e.g., 2 years for compliance), archive to Azure Storage at much lower cost.
+
+---
+
+### Resource 2 — Application Insights (One Per Microservice)
+
+```hcl
+resource "azurerm_application_insights" "services" {
+  for_each         = toset(var.services)
+  name             = "appi-${each.key}-${var.environment}"
+  workspace_id     = azurerm_log_analytics_workspace.main.id
+  application_type = each.key == "product-service" ? "other" : "web"
+}
+```
+
+#### What is Application Insights?
+
+Application Insights is **APM — Application Performance Monitoring**. It is a monitoring SDK built into each microservice. It automatically collects:
+
+- **Request telemetry** — every HTTP request: URL, method, response code, duration
+- **Dependency tracking** — calls your service makes to databases, Redis, Service Bus
+- **Exceptions** — every unhandled error with full stack trace
+- **Distributed traces** — correlating a single user request across multiple services
+
+#### Why One Per Service?
+
+```hcl
+for_each = toset(var.services)
+# Creates:
+# appi-user-service-dev
+# appi-product-service-dev
+# appi-cart-service-dev
+# appi-order-service-dev
+# appi-payment-service-dev
+# appi-notification-service-dev
+# appi-api-gateway-dev
+# appi-frontend-dev
+```
+
+Each service gets its own App Insights instance because:
+1. **Isolation** — one service's high traffic does not drown another's alerts
+2. **Clear ownership** — each team sees only their service's performance
+3. **Cost attribution** — you can see exactly how much telemetry each service generates
+
+All 8 instances feed into the **same Log Analytics Workspace** — so you can still query across all services when needed.
+
+#### application_type — "web" vs "other"
+
+```hcl
+application_type = each.key == "product-service" ? "other" : "web"
+```
+
+- **`"web"`** — for Node.js, .NET, Java apps — App Insights understands HTTP requests natively
+- **`"other"`** — for Python/FastAPI (product-service) — a generic type for non-web frameworks
+
+Choosing the wrong type causes some telemetry to not appear correctly in the Azure Portal.
+
+#### How App Insights Gets Into the Pod
+
+The connection string for each App Insights instance is:
+1. Written to Key Vault by the keyvault module (as `appinsights-user-service-cs`, etc.)
+2. Mounted into the pod as an environment variable via the CSI Driver
+3. The `telemetry.js` / `telemetry.py` module reads `APPLICATIONINSIGHTS_CONNECTION_STRING` and initialises the SDK
+
+From that point, App Insights automatically tracks every request and error — no additional code needed per endpoint.
+
+#### The Output — Map of Connection Strings
+
+```hcl
+output "application_insights_connection_strings" {
+  value     = { for svc, appi in azurerm_application_insights.services : svc => appi.connection_string }
+  sensitive = true
+}
+```
+
+This output creates a map that goes into the keyvault module, which writes one Key Vault secret per service.
+
+---
+
+### Resource 3 — Azure Managed Grafana
+
+```hcl
+resource "azurerm_dashboard_grafana" "main" {
+  name                              = "grafana-${var.project}-${var.environment}"
+  sku                               = "Standard"
+  grafana_major_version             = 11
+  api_key_enabled                   = true
+  deterministic_outbound_ip_enabled = true
+  public_network_access_enabled     = true
+
+  identity {
+    type = "SystemAssigned"
+  }
+}
+```
+
+#### What is Grafana?
+
+Grafana is the **visual dashboard layer**. It does not store data — it connects to data sources (Prometheus, Log Analytics, App Insights) and draws graphs and dashboards from them.
+
+**Analogy:** Grafana is like a car dashboard. The car has sensors measuring speed, fuel, temperature (that is Prometheus/Log Analytics). The dashboard shows you those numbers on gauges. Grafana is the gauges.
+
+#### Self-Managed vs Azure Managed Grafana
+
+| | Self-Managed Grafana | Azure Managed Grafana |
+|---|---|---|
+| **You manage** | Installation, upgrades, HA, backups | Nothing — Azure does all of it |
+| **Maintenance** | You patch Grafana when CVEs come out | Azure patches automatically |
+| **Setup time** | Hours | Minutes (Terraform creates it) |
+| **Cost** | Cheaper | Higher (managed service premium) |
+
+#### Key Properties Explained
+
+**`sku = "Standard"`** — Full Grafana feature set including Prometheus integration, alerting, and API access. Essential SKU lacks these.
+
+**`grafana_major_version = 11`** — Azure requires specifying the major version. Grafana 11 brought significant improvements to the dashboard UI and alerting.
+
+**`api_key_enabled = true`** — Allows programmatic dashboard management via API. Enables **dashboard as code** — push dashboard JSON files via API during CI/CD instead of clicking manually in the UI.
+
+**`deterministic_outbound_ip_enabled = true`** — Grafana always uses the same fixed outbound IP when connecting to data sources. This allows you to add that IP to firewall allowlists.
+
+**`identity { type = "SystemAssigned" }`** — Grafana gets a Managed Identity — a password-free Azure-managed identity — used to authenticate to Azure Monitor and Log Analytics without any credentials.
+
+#### Role Assignment — Monitoring Reader
+
+```hcl
+resource "azurerm_role_assignment" "grafana_monitor_reader" {
+  scope                = "/subscriptions/.../resourceGroups/${var.resource_group_name}"
+  role_definition_name = "Monitoring Reader"
+  principal_id         = azurerm_dashboard_grafana.main.identity[0].principal_id
+}
+```
+
+Grafana's Managed Identity gets **Monitoring Reader** on the entire resource group. This allows Grafana to read Azure Monitor metrics, query Log Analytics workspaces, and read App Insights telemetry. Without this role, Grafana connects but gets 403 Forbidden on every query.
+
+---
+
+### Resource 4 — Prometheus and PrometheusRule (In-Cluster Metrics)
+
+Prometheus runs inside AKS as the `kube-prometheus-stack` Helm chart. The alert rules live in `k8s/alert-rules/azureshop-alerts.yaml`.
+
+#### What is Prometheus?
+
+Prometheus is an open-source metrics collection system that uses a **pull model** — instead of services pushing metrics to Prometheus, Prometheus periodically visits each service's `/metrics` endpoint and pulls the data.
+
+```
+Every 15 seconds:
+Prometheus → scrapes → user-service:3001/metrics
+Prometheus → scrapes → product-service:3002/metrics
+... all 8 services
+```
+
+Each service's `/metrics` endpoint returns data in Prometheus format:
+```
+http_requests_total{service="user-service",status_code="200"} 12450
+http_requests_total{service="user-service",status_code="500"} 23
+http_request_duration_seconds_bucket{le="0.1"} 11200
+http_request_duration_seconds_bucket{le="0.5"} 12100
+http_request_duration_seconds_bucket{le="1.0"} 12400
+```
+
+#### How Prometheus Knows What to Scrape
+
+Each Helm deployment has annotations:
+```yaml
+annotations:
+  prometheus.io/scrape: "true"
+  prometheus.io/port: "3001"
+  prometheus.io/path: "/metrics"
+```
+
+Prometheus Operator reads these and automatically adds the service to its scrape list. No manual config needed.
+
+#### PrometheusRule
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  labels:
+    release: kube-prometheus-stack   # MUST match — operator uses this label to load rules
+```
+
+`PrometheusRule` is a Kubernetes Custom Resource. When you `kubectl apply` this file, the Prometheus Operator reads it and loads the rules into Prometheus automatically. The `release: kube-prometheus-stack` label is mandatory — without it, rules are silently ignored.
+
+---
+
+### The 10 Alert Rules — Each One Explained
+
+#### Group 1: HTTP-Level Alerts
+
+**Alert 1 — HighErrorRate (Critical)**
+```yaml
+expr: (5xx_requests / total_requests) > 0.05
+for: 5m
+```
+Fires when any service returns 5xx errors on more than 5% of requests for 5 consecutive minutes. Why 5%: normal transient errors stay under 1%; 5% means something structurally wrong — bad deploy, downstream failure, or OOM kill. `for: 5m` prevents flapping on single spikes.
+
+**Alert 2 — HighP95Latency (Warning)**
+```yaml
+expr: histogram_quantile(0.95, rate(duration_bucket[5m])) > 1
+for: 5m
+```
+Fires when P95 response time exceeds 1 second. P95 = 95th percentile — 95% of requests are faster than this value. We use P95 instead of average because averages hide outliers. Why 1s: our SLO target — above 1s users notice slowness.
+
+**Alert 3 — ServiceReceivingNoTraffic (Warning)**
+```yaml
+expr: absent(rate(http_requests_total[5m]))
+for: 10m
+```
+`absent()` returns 1 when a metric series completely disappears — all pods crashed or Prometheus lost connectivity. Detects the "unknown unknown" — not a high error rate, but no data at all.
+
+#### Group 2: Pod Availability Alerts
+
+**Alert 4 — PodCrashLoopBackOff (Critical)**
+```yaml
+expr: kube_pod_container_status_waiting_reason{reason="CrashLoopBackOff"} == 1
+for: 5m
+```
+CrashLoopBackOff = container starts, crashes immediately, Kubernetes keeps retrying with exponential backoff. Common causes: missing env var, bad config, OOM kill on startup.
+
+**Alert 5 — PodNotRunning (Warning)**
+```yaml
+expr: kube_pod_status_phase{phase!="Running",phase!="Succeeded"} == 1
+for: 15m
+```
+Catches pods stuck in Pending (not enough resources to schedule), Failed, or Unknown states. Succeeded is excluded — completed Jobs are supposed to stop.
+
+**Alert 6 — DeploymentUnavailable (Critical)**
+```yaml
+expr: kube_deployment_status_replicas_available{namespace="dev"} == 0
+for: 2m
+```
+Most severe availability alert. Zero replicas = service completely down. Only 2 minutes `for:` — need to know fast when a service is fully down.
+
+**Alert 7 — PodUnschedulable (Warning)**
+```yaml
+expr: kube_pod_status_unschedulable{namespace="dev"} == 1
+for: 10m
+```
+Pod exists but Kubernetes cannot find a node to run it. Causes: cluster is full (all nodes at CPU/memory capacity), or node affinity/taints prevent scheduling.
+
+#### Group 3: Capacity Alerts
+
+**Alert 8 — HPAAtMaxReplicas (Warning)**
+```yaml
+expr: hpa_current_replicas == hpa_max_replicas
+for: 10m
+```
+HPA wants to scale but is blocked by maxReplicas. Traffic is growing but we are capped. SRE response: raise maxReplicas in Helm values or investigate unusual load.
+
+**Alert 9 — HighMemoryUsage (Warning)**
+```yaml
+expr: (memory_working_set / memory_limit) > 0.85
+for: 5m
+```
+Container using more than 85% of its memory limit. At 100% the kernel OOM-kills the container. Alert at 85% gives time to act before the kill happens.
+
+**Alert 10 — HighCPUThrottling (Warning)**
+```yaml
+expr: (throttled_seconds / total_periods) > 0.25
+for: 10m
+```
+CPU throttling is different from high CPU usage. When a container hits its CPU limit, Linux pauses it (throttles) until the next quota period. The container appears running but responds slowly. Users experience latency spikes without seeing errors.
+
+---
+
+### SRE Concepts — SLIs, SLOs, and Error Budgets
+
+#### SLI — Service Level Indicator
+
+An **SLI** is a measurement — a specific metric that tells you how reliable your service is. Good SLIs are things users directly experience:
+
+| SLI Type | What We Measure | Our Metric |
+|---|---|---|
+| **Availability** | % of requests that succeed | `1 - error_rate` |
+| **Latency** | % of requests under threshold | P95 < 1 second |
+| **Throughput** | Requests per second handled | `rate(http_requests_total[5m])` |
+| **Error rate** | % of requests that return 5xx | `5xx / total` |
+
+#### SLO — Service Level Objective
+
+An **SLO** is a target for an SLI — the reliability goal you commit to:
+
+```
+Availability SLO: 99.9% of requests succeed per month
+Latency SLO:      95% of requests complete in under 1 second
+```
+
+**99.9% availability per month** in numbers:
+```
+30 days × 24 hours × 60 minutes = 43,200 minutes per month
+43,200 × 0.1% = 43.2 minutes of downtime allowed per month
+```
+
+That 43.2 minutes is your **error budget**.
+
+#### Error Budget
+
+**Error budget = 100% minus SLO target**
+
+For a 99.9% availability SLO:
+```
+Error budget = 0.1% = 43.2 minutes/month of allowed downtime
+```
+
+Error budget is the most powerful concept in SRE because it makes reliability decisions data-driven:
+
+| Budget Status | Engineering Response |
+|---|---|
+| Full budget remaining | Deploy fearlessly, run experiments |
+| 50% budget consumed | Slow down deploys, investigate instability |
+| Budget exhausted | Feature freeze — only reliability work until budget resets |
+
+Without error budget:
+- Dev: "Why won't you let me deploy?"
+- SRE: "Because it's risky."
+
+With error budget:
+- SRE: "We've used 80% of this month's error budget. We have 9 minutes left. Another deploy that causes 10 minutes of downtime will exhaust the budget and trigger a feature freeze."
+- Dev: "OK, let's make the deploy safer first."
+
+#### How Our Alerts Map to SLOs
+
+```
+HighErrorRate (>5% errors for 5m)     → Burning error budget 50x faster → Critical page
+HighP95Latency (P95 > 1s for 5m)      → Violating latency SLO → Warning
+DeploymentUnavailable (0 replicas 2m) → 100% error rate, entire budget in minutes → Critical page
+```
+
+---
+
+### The Complete Monitoring Stack — How Everything Connects
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│  APPLICATION LAYER (inside pods)                             │
+│  telemetry.js/telemetry.py — SDK initialised with App        │
+│  Insights connection string from Key Vault                   │
+└──────────────┬───────────────────────────┬───────────────────┘
+               │                           │
+               ▼                           ▼
+┌──────────────────────┐    ┌─────────────────────────────────┐
+│  /metrics endpoint   │    │  Application Insights           │
+│  (Prometheus format) │    │  (one per service)              │
+│                      │    │                                 │
+│  http_requests_total │    │  Requests, exceptions,          │
+│  duration_buckets    │    │  dependencies, traces           │
+└──────────┬───────────┘    └───────────────┬─────────────────┘
+           │ (scrape every 15s)             │ (push)
+           ▼                                ▼
+┌──────────────────────┐    ┌─────────────────────────────────┐
+│  Prometheus          │    │  Log Analytics Workspace        │
+│  (in-cluster)        │    │  law-azureshop-dev              │
+│                      │    │                                 │
+│  Evaluates alert     │    │  Central store for ALL logs     │
+│  rules every 1m      │    │  Query with KQL                 │
+└──────────┬───────────┘    └───────────────┬─────────────────┘
+           │                                │
+           └──────────────┬─────────────────┘
+                          ▼
+┌──────────────────────────────────────────────────────────────┐
+│  Azure Managed Grafana — grafana-azureshop-dev               │
+│                                                              │
+│  Data sources: Prometheus + Azure Monitor + App Insights     │
+│  Dashboards: Request rate, error rate, P95, pod count,      │
+│              CPU, memory — per service, per environment      │
+└──────────────────────────────────────────────────────────────┘
+           │ (when alert fires)
+           ▼
+   Alert Manager → PagerDuty / Email / Teams
+   On-call engineer is paged
+```
+
+---
+
+### Summary — All Concepts in One Table
+
+| Concept | What It Is | Our Usage |
+|---|---|---|
+| **Log Analytics Workspace** | Central log database for all Azure resources | All AKS, App Insights, SQL logs in one place |
+| **KQL** | Query language for Log Analytics | Used to investigate incidents |
+| **Application Insights** | APM — tracks requests, errors, traces per service | One instance per microservice |
+| **for_each** | Create 8 App Insights from one block | `toset(var.services)` |
+| **Azure Managed Grafana** | Hosted Grafana — no server to manage | Dashboards for all 8 services |
+| **Monitoring Reader role** | Allows Grafana to read Azure metrics | Scoped to resource group |
+| **Prometheus** | In-cluster pull-based metrics collector | Scrapes /metrics every 15s |
+| **PrometheusRule** | Kubernetes CR defining alert rules | 10 alerts in 3 groups |
+| **kube-state-metrics** | Exports K8s object state as Prometheus metrics | Pod phase, deployment replicas |
+| **P95 latency** | 95th percentile response time | SLO target: P95 < 1s |
+| **SLI** | What you measure | Error rate, latency, availability |
+| **SLO** | Your reliability target | 99.9% requests succeed |
+| **Error budget** | 100% minus SLO | 43.2 min/month downtime allowed |
+| **Three pillars** | Logs + Metrics + Traces | Full observability |
+| **PerGB2018** | Pay-per-GB Log Analytics SKU | Standard cost-effective option |
+
+---
+
+### Interview Questions and Answers
+
+**Q1: What is the difference between metrics, logs, and traces? How does your project use all three?**
+
+> "These are the three pillars of observability. Metrics are numerical measurements over time — request rate, error rate, latency percentiles, CPU usage. We collect these with Prometheus scraping each service's `/metrics` endpoint every 15 seconds. Logs are text events — what happened, when, and why. We send all logs to Log Analytics Workspace and query them with KQL during incident investigation. Traces show the journey of a single request across multiple services — Application Insights SDK in each service captures distributed traces automatically. Metrics tell you SOMETHING is wrong, logs tell you WHAT happened, traces show you WHERE in the call chain the problem is."
+
+---
+
+**Q2: What is an SLO and how does it connect to your alerting strategy?**
+
+> "SLO is Service Level Objective — a reliability target. For AzureShop we target 99.9% availability and P95 latency under 1 second. The SLO defines an error budget — 99.9% availability means 43 minutes of downtime per month is allowed. Our alerts are calibrated around these SLOs. The HighErrorRate alert fires when error rate exceeds 5% for 5 minutes — at 5% errors we are burning the error budget 50x faster than expected. The HighP95Latency alert fires when our latency SLO is violated. The DeploymentUnavailable alert fires after just 2 minutes with 0 replicas — at 100% error rate, we would exhaust the entire month's error budget in under an hour."
+
+---
+
+**Q3: Why does Prometheus use a pull model instead of push? What is the advantage?**
+
+> "In a pull model, Prometheus visits each service's `/metrics` endpoint on a schedule and collects the data. The pull model has two key advantages: first, Prometheus is the single source of truth about what is being monitored — if a service goes down, Prometheus immediately knows because the scrape fails, whereas in a push model a dead service just stops sending data silently. Second, it is easier to configure — Prometheus uses Kubernetes annotations on pods to discover what to scrape, no service-side configuration needed. The trade-off is that pull requires network access from Prometheus to every service — which is fine inside a cluster."
+
+---
+
+**Q4: What is P95 latency and why do we use it instead of average latency?**
+
+> "P95 latency is the 95th percentile response time — 95% of requests completed faster than this value. We use P95 instead of average because averages hide outliers. If 90% of requests take 100ms and 10% take 10 seconds, the average is 1090ms — looks bad overall but most users are fine. P95 captures the experience of the slowest 5% of users, which is where reliability problems actually appear. In our Prometheus alerts we calculate P95 using `histogram_quantile(0.95, ...)` on the duration histogram buckets exposed by each service."
+
+---
+
+**Q5: What is an error budget and how does it change engineering behaviour?**
+
+> "An error budget is the allowed amount of unreliability derived from the SLO. If the SLO is 99.9% availability, the error budget is 0.1% — about 43 minutes of downtime per month. Error budget makes reliability decisions data-driven instead of opinion-driven. When the budget is full, teams deploy frequently and experiment. As the budget depletes, teams slow down and add more testing. When the budget is exhausted, there is a feature freeze — only reliability work until the budget resets. This resolves the classic tension between velocity and reliability: developers are not slowed arbitrarily, but when reliability suffers measurably, velocity decreases proportionally."
+
+---
+
+**Q6: How does Application Insights differ from Prometheus in your setup? Why use both?**
+
+> "They serve different purposes. Prometheus is optimised for metrics — time-series numbers like request rate, error rate, CPU usage — collected by scraping a `/metrics` endpoint every 15 seconds. It has a powerful query language (PromQL) for aggregations and alerting. Application Insights is an APM tool focused on application-level observability — it captures request traces, exceptions with stack traces, dependency calls (database queries, Redis calls), and distributed traces across services. We use both because Prometheus gives us infrastructure and capacity metrics for alerting and autoscaling decisions, while Application Insights gives us the application-level detail needed to debug why a specific request failed or which database query is causing latency. Prometheus tells you there is a problem, App Insights tells you exactly where in the code."
+
+---
+
+**Q7: Why does each microservice get its own Application Insights instance?**
+
+> "Three reasons. First, isolation — one service's high traffic volume does not drown out alerts and data from another service. Second, ownership — each team looks at their service's Application Insights without seeing unrelated services' data. Third, cost attribution — in production, you can see exactly how much telemetry each service generates and optimise accordingly. All 8 instances share the same Log Analytics Workspace as their backend store, so when you need to query across all services during an incident, you can still do cross-service KQL queries. Isolated by default, unified when needed."
