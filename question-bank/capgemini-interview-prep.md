@@ -778,6 +778,348 @@ In the Azure Portal, you go to Application Insights → Transaction Search → f
 
 ---
 
+### Q11.1. What is OpenTelemetry? Why and how do you use it? Explain with a real-world example.
+
+**Answer:**
+
+## The Problem Before OpenTelemetry
+
+In AzureShop, every service uses the Application Insights SDK to send telemetry:
+
+```javascript
+// product-service — Node.js
+const appInsights = require('applicationinsights');
+appInsights.setup(process.env.APPLICATIONINSIGHTS_CONNECTION_STRING).start();
+```
+
+This works — but imagine 6 months later the client says: "We are switching from Application Insights to Datadog."
+
+Now you must:
+1. Remove all `applicationinsights` code from all 8 services
+2. Install `dd-trace` (Datadog SDK) in all 8 services
+3. Rewrite all instrumentation code across hundreds of files
+4. Test everything again
+
+That is a **massive, expensive refactor** just because you changed your observability vendor.
+
+Now imagine your company uses Application Insights for traces, Prometheus for metrics, and Splunk for logs. That is **three different SDKs** in every service — three different APIs to learn, three different ways things break.
+
+**This is the exact problem OpenTelemetry solves.**
+
+---
+
+## What is OpenTelemetry?
+
+OpenTelemetry (OTel) is an **open-source, vendor-neutral observability framework**. It is a CNCF project — the same organisation that maintains Kubernetes, Prometheus, and Helm.
+
+It provides:
+- A **standard API** — one way to instrument your code, regardless of vendor
+- **SDKs** for every language — Node.js, Python, Java, Go, .NET
+- A **Collector** — a standalone agent that receives, processes, and forwards telemetry anywhere
+- **Auto-instrumentation libraries** — automatically trace HTTP requests, DB calls, message queues without writing a single line of instrumentation code
+
+> Instrument your code ONCE with OpenTelemetry.
+> Decide WHERE to send the data via configuration — not code.
+> Switch vendors by changing a config file, not rewriting your application.
+
+---
+
+## The Three Pillars of Observability
+
+OpenTelemetry covers all three signals that make a system observable:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                       OBSERVABILITY                               │
+│                                                                   │
+│  ┌─────────────┐     ┌─────────────┐     ┌─────────────┐        │
+│  │   TRACES    │     │   METRICS   │     │    LOGS     │        │
+│  │             │     │             │     │             │        │
+│  │ What        │     │ How much /  │     │ What        │        │
+│  │ happened,   │     │ how fast /  │     │ happened    │        │
+│  │ in what     │     │ how often   │     │ at a        │        │
+│  │ order,      │     │             │     │ specific    │        │
+│  │ how long    │     │ Numbers     │     │ moment      │        │
+│  │             │     │ over time   │     │ Text events │        │
+│  └─────────────┘     └─────────────┘     └─────────────┘        │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+Before OpenTelemetry, these three signals used completely different tools and SDKs. OpenTelemetry unifies all three under one framework.
+
+---
+
+## OpenTelemetry Architecture — All Components Explained
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│                       YOUR APPLICATION                            │
+│                                                                   │
+│  ┌───────────────────────────────────────────────────────────┐   │
+│  │                   OpenTelemetry SDK                        │   │
+│  │                                                            │   │
+│  │  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐  │   │
+│  │  │  OTel API    │  │ Auto-Instr.  │  │ Manual Spans    │  │   │
+│  │  │ (your code   │  │ Libraries    │  │ (your custom    │  │   │
+│  │  │  calls this) │  │ (HTTP, DB,   │  │  business logic)│  │   │
+│  │  └──────────────┘  │  Redis, etc) │  └─────────────────┘  │   │
+│  │                    └──────────────┘                        │   │
+│  │  ┌─────────────────────────────────────────────────────┐   │   │
+│  │  │                    Exporters                         │   │   │
+│  │  │  OTLP Exporter (sends via OpenTelemetry Protocol)   │   │   │
+│  │  └─────────────────────────────────────────────────────┘   │   │
+│  └───────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────┘
+                              │
+                              │  OTLP (OpenTelemetry Protocol)
+                              ▼
+┌──────────────────────────────────────────────────────────────────┐
+│                  OpenTelemetry Collector                           │
+│                                                                   │
+│  RECEIVE  ──►  PROCESS  ──►  EXPORT                               │
+│                                                                   │
+│  Receivers:      Processors:       Exporters:                     │
+│  - OTLP          - Batch           - Azure Monitor / App Insights │
+│  - Prometheus    - Filter          - Prometheus                   │
+│  - Jaeger        - Sampling        - Jaeger                       │
+│                  - Add k8s labels  - Datadog                      │
+└──────────────────────────────────────────────────────────────────┘
+         │                     │                     │
+         ▼                     ▼                     ▼
+  Azure Monitor /         Prometheus            Jaeger / Zipkin
+  Application Insights    (metrics)             (trace UI)
+```
+
+**OTel API:** The interfaces your code calls to create spans and metrics. If OTel is not configured, these are no-ops — your app does not break.
+
+**OTel SDK:** The implementation of the API. Handles collecting, batching, and exporting data.
+
+**Auto-Instrumentation Libraries:** Pre-built plugins that trace popular frameworks automatically:
+- `@opentelemetry/instrumentation-express` — every HTTP request in Express.js traced
+- `@opentelemetry/instrumentation-pg` — every PostgreSQL query traced
+- `@opentelemetry/instrumentation-redis` — every Redis command traced
+- `opentelemetry-instrumentation-fastapi` — every FastAPI route traced (Python)
+
+You add them once during SDK setup. Every HTTP call, DB query, and Redis command is automatically traced — **zero changes to your application code**.
+
+**Exporters:** Plugins that send data to a specific backend. Swap exporters to change backends without touching application code.
+
+**OTel Collector:** A standalone service (runs as a pod in Kubernetes) that receives telemetry from all your apps, processes it, and fans it out to multiple backends simultaneously.
+
+---
+
+## Traces Deep Dive — Real AzureShop Example
+
+User clicks "Place Order." The request travels through 4 services:
+
+```
+[TraceID: abc-123-xyz]
+│
+├── [Span 1] api-gateway — receive POST /api/orders           0ms →   2ms
+│
+├── [Span 2] order-service — create order                     2ms →  45ms
+│   ├── [Span 2a] SQL INSERT into orders table                5ms →  20ms
+│   └── [Span 2b] Send message to Service Bus                20ms →  40ms
+│
+├── [Span 3] payment-service — process payment               45ms → 180ms
+│   ├── [Span 3a] Call external payment gateway              50ms → 170ms  ← SLOW
+│   └── [Span 3b] SQL UPDATE order status                   170ms → 178ms
+│
+└── [Span 4] notification-service — send email              180ms → 220ms
+    └── [Span 4a] Call SendGrid API                         182ms → 218ms
+
+Total: 220ms
+```
+
+You can immediately see: **the payment gateway call takes 120ms out of 220ms total.** That is your bottleneck. Without distributed tracing you would only see "the order endpoint is slow" with no idea why.
+
+OpenTelemetry propagates the `traceId` automatically across services via the `traceparent` HTTP header (W3C standard). Every service picks it up and logs spans under the same trace — automatically.
+
+---
+
+## How to Use OpenTelemetry — Code Examples
+
+### Node.js — order-service
+
+**Install:**
+```bash
+npm install @opentelemetry/sdk-node \
+            @opentelemetry/auto-instrumentations-node \
+            @azure/monitor-opentelemetry-exporter \
+            @opentelemetry/exporter-prometheus
+```
+
+**Create `tracing.js` (loaded before everything else):**
+```javascript
+const { NodeSDK } = require('@opentelemetry/sdk-node');
+const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
+const { AzureMonitorTraceExporter } = require('@azure/monitor-opentelemetry-exporter');
+const { PrometheusExporter } = require('@opentelemetry/exporter-prometheus');
+const { Resource } = require('@opentelemetry/resources');
+const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
+
+const sdk = new NodeSDK({
+  resource: new Resource({
+    [SemanticResourceAttributes.SERVICE_NAME]: 'order-service',
+    [SemanticResourceAttributes.DEPLOYMENT_ENVIRONMENT]: process.env.NODE_ENV,
+  }),
+  // Send traces to Application Insights
+  traceExporter: new AzureMonitorTraceExporter({
+    connectionString: process.env.APPLICATIONINSIGHTS_CONNECTION_STRING,
+  }),
+  // Expose metrics on /metrics for Prometheus to scrape
+  metricReader: new PrometheusExporter({ port: 9464 }),
+  // Auto-instrument Express, SQL, Redis, HTTP clients
+  instrumentations: [getNodeAutoInstrumentations()],
+});
+
+sdk.start();
+```
+
+**Load it as the very first line of your app:**
+```javascript
+// index.js
+require('./tracing');   // ← first line, before any other require
+const express = require('express');
+// ... rest of app unchanged
+```
+
+**Add manual spans for business logic:**
+```javascript
+const { trace, SpanStatusCode } = require('@opentelemetry/api');
+const tracer = trace.getTracer('order-service');
+
+async function createOrder(orderData) {
+  return tracer.startActiveSpan('order.validate-and-create', async (span) => {
+    try {
+      span.setAttribute('order.customerId', orderData.customerId);
+      span.setAttribute('order.totalAmount', orderData.total);
+
+      const order = await db.createOrder(orderData);  // auto-traced by OTel
+
+      span.setAttribute('order.id', order.id);
+      span.setStatus({ code: SpanStatusCode.OK });
+      return order;
+    } catch (error) {
+      span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      span.recordException(error);
+      throw error;
+    } finally {
+      span.end();  // always end the span
+    }
+  });
+}
+```
+
+---
+
+### Python — product-service
+
+**Install:**
+```bash
+pip install opentelemetry-sdk \
+            opentelemetry-instrumentation-fastapi \
+            opentelemetry-instrumentation-sqlalchemy \
+            azure-monitor-opentelemetry-exporter
+```
+
+**Setup in `main.py`:**
+```python
+from opentelemetry import trace
+from opentelemetry.sdk.trace import TracerProvider
+from opentelemetry.sdk.resources import Resource
+from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+from azure.monitor.opentelemetry.exporter import AzureMonitorTraceExporter
+from opentelemetry.sdk.trace.export import BatchSpanProcessor
+
+resource = Resource.create({"service.name": "product-service"})
+provider = TracerProvider(resource=resource)
+exporter = AzureMonitorTraceExporter(
+    connection_string=os.getenv("APPLICATIONINSIGHTS_CONNECTION_STRING")
+)
+provider.add_span_processor(BatchSpanProcessor(exporter))
+trace.set_tracer_provider(provider)
+
+app = FastAPI()
+FastAPIInstrumentor.instrument_app(app)   # auto-trace all routes
+SQLAlchemyInstrumentor().instrument()     # auto-trace all DB queries
+```
+
+---
+
+## OTel Collector in Kubernetes — The Power Move
+
+Deploy the Collector as a Deployment in AKS. Apps send to Collector. Collector fans out to multiple backends simultaneously:
+
+```yaml
+# otel-collector-config.yaml
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    timeout: 10s
+  k8sattributes:                        # add pod name, namespace to every span
+    extract:
+      metadata: [k8s.pod.name, k8s.namespace.name]
+  filter:
+    traces:
+      exclude:
+        match_type: strict
+        span_names: ["GET /health", "GET /ready"]   # drop health check noise
+
+exporters:
+  azuremonitor:
+    connection_string: "${APPLICATIONINSIGHTS_CONNECTION_STRING}"
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+  jaeger:
+    endpoint: jaeger:14250
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, k8sattributes, filter]
+      exporters: [azuremonitor, jaeger]   # fan out to two backends at once
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
+```
+
+Apps send to `otel-collector:4317`. To add Datadog tomorrow — add one exporter line in this config file. **Zero application code changes.**
+
+---
+
+## OpenTelemetry vs Application Insights SDK
+
+| | Application Insights SDK | OpenTelemetry |
+|---|---|---|
+| Vendor | Microsoft only | Vendor neutral (CNCF) |
+| Signals covered | Traces + some metrics | Traces + Metrics + Logs |
+| Switch backends | Rewrite application code | Change Collector config |
+| Auto-instrumentation | Yes (Azure-specific) | Yes (broader ecosystem) |
+| Industry standard | No | Yes — Google, Microsoft, AWS all back it |
+| Prometheus metrics | No | Yes (native) |
+| Lock-in risk | High | None |
+
+**When to use App Insights SDK:** Pure Azure shop, no plans to switch vendors, team already knows it.
+
+**When to use OpenTelemetry:** Multi-cloud, mixed backends, or Prometheus + App Insights simultaneously — which is exactly the AzureShop setup.
+
+---
+
+**One-line summary for the interview:**
+
+> OpenTelemetry is a vendor-neutral framework that lets you instrument your code once for traces, metrics, and logs, then send that telemetry to any backend — Application Insights, Prometheus, Datadog — by changing configuration, not application code.
+
+---
+
 ### Q12. What is P95/P99 latency? Why is it more useful than average latency?
 
 **Answer:**
