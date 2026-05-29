@@ -1789,6 +1789,458 @@ This routes 20% of traffic to the canary Deployment, 80% to the stable Deploymen
 
 ---
 
+### Q19.1. Give a full practical explanation of Rolling, Blue/Green, and Canary deployments — how they work, real company examples, differences, and when real IT companies use each.
+
+**Answer:**
+
+## Why Deployment Strategies Exist
+
+Every time you ship new code to production, you are taking a risk. The new version might crash, be slow, or break a working feature. The question is: how do you get new code to users while protecting them from that risk?
+
+In the old days companies deployed like this:
+1. Take the server offline (maintenance window at 2am Saturday)
+2. Copy new code to server
+3. Start server and pray it works
+4. If broken — roll back manually (takes hours)
+
+Modern companies ship code dozens of times per day with zero downtime. That is only possible because of deployment strategies.
+
+**The core problem all three strategies solve:**
+
+```
+V1 (running, stable, users on it)  →  V2 (new, untested in production)
+```
+
+Each strategy answers differently: how do you move users from V1 to V2 safely?
+
+---
+
+## Strategy 1 — Rolling Deployment
+
+### What It Is
+
+Rolling deployment replaces instances of the old version (V1) with the new version (V2) gradually, one pod at a time — like rolling a wave across your fleet.
+
+### How It Works — Step by Step
+
+```
+Step 0 — Before:
+[Pod1:V1 ✅] [Pod2:V1 ✅] [Pod3:V1 ✅] [Pod4:V1 ✅]
+All pods serving traffic on V1
+
+Step 1 — Start new V2 pod:
+[Pod1:V1 ✅] [Pod2:V1 ✅] [Pod3:V1 ✅] [Pod4:V1 ✅] [Pod5:V2 🔄]
+
+Step 2 — V2 passes readiness probe, enters rotation:
+[Pod1:V1 ✅] [Pod2:V1 ✅] [Pod3:V1 ✅] [Pod4:V1 ✅] [Pod5:V2 ✅]
+
+Step 3 — Terminate one V1 pod:
+[Pod1:V1 ✅] [Pod2:V1 ✅] [Pod3:V1 ✅] [Pod5:V2 ✅]
+
+Step 4 — Repeat until all V1 pods replaced:
+[Pod5:V2 ✅] [Pod6:V2 ✅] [Pod7:V2 ✅] [Pod8:V2 ✅]
+Deployment complete — 100% on V2
+```
+
+During the rollout, V1 and V2 pods run simultaneously. Users hit both versions.
+
+### Kubernetes Config (AzureShop Helm charts)
+
+```yaml
+spec:
+  replicas: 4
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1         # max 1 extra pod during rollout (4+1=5 total)
+      maxUnavailable: 0   # never remove V1 until V2 is healthy = zero downtime
+```
+
+### Rollback
+
+```bash
+kubectl rollout undo deployment/product-service -n dev
+# Kubernetes stores history — rollback is instant
+```
+
+### Real Company Example — Rolling
+
+**Company:** A SaaS startup deploying a bug fix for the search filter. Low-risk change, just a small function update.
+
+- CI pipeline runs (tests pass, Trivy scan clean)
+- CD triggers rolling update
+- Over 3 minutes pods gradually replace V1 → V2
+- 99.9% of users never notice anything
+
+**Why rolling here:** Fast, simple, zero extra infrastructure cost. Perfect for routine low-risk changes.
+
+### Risks
+
+- **Mixed-version problem:** V1 and V2 run together. If V2 has a DB schema change V1 does not understand — V1 pods start failing. Rolling requires backward-compatible changes.
+- **Slow detection:** A subtle bug (memory leak, not a crash) may take time to catch while V2 gradually spreads.
+
+### When Real Companies Use Rolling
+
+- Day-to-day bug fixes and minor feature releases
+- Internal tools and non-critical services
+- Backward-compatible changes
+- When you want zero extra infrastructure cost
+- Default choice — no special setup needed
+
+---
+
+## Strategy 2 — Blue/Green Deployment
+
+### What It Is
+
+Blue/Green maintains two complete, identical production environments — Blue (current live version V1) and Green (new version V2). Deploy to Green, test it fully, then switch ALL traffic instantly with a single load balancer change. Like a light switch — not a dimmer.
+
+### How It Works — Step by Step
+
+```
+BEFORE DEPLOYMENT:
+
+Internet → Load Balancer / App Gateway
+                │
+                ▼ 100% traffic
+         ┌──────────────────┐
+         │   BLUE  (V1) ✅   │  ← live, serving all users
+         │   4 replicas      │
+         └──────────────────┘
+
+         ┌──────────────────┐
+         │   GREEN (V2) ✅   │  ← running but ZERO traffic
+         │   4 replicas      │
+         └──────────────────┘
+
+STEP 1 — Deploy V2 to Green, test thoroughly (QA, perf tests, UAT)
+
+STEP 2 — Flip traffic (takes seconds):
+Internet → Load Balancer
+                │
+                ▼ 100% traffic
+         ┌──────────────────┐
+         │   BLUE  (V1) ✅   │  ← still running — instant rollback target
+         └──────────────────┘  (kept alive 30–60 min then destroyed)
+
+         ┌──────────────────┐
+         │   GREEN (V2) ✅   │  ← now LIVE, serving all users
+         └──────────────────┘
+```
+
+### Rollback — Instant
+
+```bash
+# Flip traffic back to Blue — 30 seconds
+kubectl patch service product-service \
+  -p '{"spec":{"selector":{"version":"blue"}}}'
+```
+
+Zero redeployment. Zero data loss. Just flip the switch back.
+
+### Kubernetes Implementation — Two Deployments, One Service
+
+```yaml
+# Blue Deployment (V1)
+metadata:
+  name: product-service-blue
+spec:
+  template:
+    metadata:
+      labels:
+        app: product-service
+        version: blue
+
+---
+# Green Deployment (V2)
+metadata:
+  name: product-service-green
+spec:
+  template:
+    metadata:
+      labels:
+        app: product-service
+        version: green
+
+---
+# Service — switch by changing ONE selector label
+kind: Service
+spec:
+  selector:
+    app: product-service
+    version: blue   # ← change to "green" to flip all traffic instantly
+```
+
+### Real Company Example — Blue/Green
+
+**Company:** A large bank — internet banking application.
+
+**Scenario:** Major release — completely redesigned transaction history page, new API contracts, new DB indexes. V1 and V2 are NOT compatible. Mixed versions would cause errors.
+
+**Why Blue/Green:**
+1. Breaking changes — V1 and V2 cannot run together (rolling is unsafe)
+2. Compliance requires exhaustive testing before go-live
+3. Need instant rollback — if 1000 customers complain in 5 minutes, flip back in 30 seconds
+4. Deployed at 2am Sunday (low traffic window)
+
+**What happens:**
+- Green running V2 since Friday — QA team testing all week
+- Saturday: full performance test against Green → passes
+- Sunday 2am: traffic switched Blue → Green in 30 seconds
+- Monday morning: 2 million customers on new UI
+- Tuesday: Blue destroyed to save cost
+
+### The Database Migration Challenge
+
+If V2 requires a new DB column:
+```sql
+ALTER TABLE orders ADD COLUMN discount_code VARCHAR(50);
+```
+If you roll back to V1 — V1 does not know about this column and may fail.
+
+**Solution — Expand/Contract pattern:**
+- Phase 1: Add column as NULLABLE → both V1 and V2 work
+- Phase 2: Switch to V2 (uses the column)
+- Phase 3: Make column NOT NULL → only after V1 fully retired
+
+### When Real Companies Use Blue/Green
+
+- Major releases with breaking API or schema changes
+- Banking, healthcare, financial services (zero user impact tolerance)
+- When instant rollback is a hard requirement
+- UI redesigns where mixed old/new versions look broken
+- Regulatory deployments with mandatory UAT sign-off
+
+---
+
+## Strategy 3 — Canary Deployment
+
+### What It Is
+
+Send a small percentage of real production traffic (e.g., 5%, 10%, 20%) to V2 while the rest goes to V1. Observe V2's behaviour with real users. If metrics are healthy, gradually increase the percentage. If metrics degrade, route all traffic back to V1 instantly.
+
+### Why "Canary"?
+
+Coal miners carried canary birds into mines. If poisonous gas was present, the canary died first — warning miners before they were affected. In software: a small group of users "experiences" the new version first. If it is buggy, they are affected but the majority is protected.
+
+### How It Works — Step by Step
+
+```
+Hour 0:  [V1][V1][V1][V1][V1]   100% on V1
+
+Hour 1:  [V1][V1][V1][V1][V2]   80% V1 / 20% V2 (canary)
+         ↓
+         Monitor: error rate, latency, business metrics
+         V2 looks healthy → proceed
+
+Hour 3:  [V1][V1][V1][V2][V2]   60% V1 / 40% V2
+Hour 6:  [V1][V1][V2][V2][V2]   40% V1 / 60% V2
+Hour 12: [V1][V2][V2][V2][V2]   20% V1 / 80% V2
+Hour 24: [V2][V2][V2][V2][V2]   100% V2 — rollout complete
+
+IF BUG DETECTED at Hour 1:
+V2 error rate spikes to 8% → Set canary weight to 0%
+Only 20% of users were affected. 80% never saw the bug.
+```
+
+### Canary in Kubernetes — NGINX Ingress (AzureShop Phase 9)
+
+```yaml
+# Stable Ingress (V1 — always exists)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: product-service-stable
+spec:
+  rules:
+  - host: shop.example.com
+    http:
+      paths:
+      - path: /api/products
+        backend:
+          service:
+            name: product-service-v1
+            port: 8000
+
+---
+# Canary Ingress (V2 — gets percentage of traffic)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: product-service-canary
+  annotations:
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: "20"    # 20% to V2
+spec:
+  rules:
+  - host: shop.example.com
+    http:
+      paths:
+      - path: /api/products
+        backend:
+          service:
+            name: product-service-v2
+            port: 8000
+```
+
+Increase canary weight:
+```bash
+kubectl annotate ingress product-service-canary \
+  nginx.ingress.kubernetes.io/canary-weight="50" --overwrite
+```
+
+Abort canary (set to 0%):
+```bash
+kubectl annotate ingress product-service-canary \
+  nginx.ingress.kubernetes.io/canary-weight="0" --overwrite
+```
+
+### Advanced — User-Based Routing
+
+Route specific users to canary instead of random percentage:
+
+```yaml
+# Only users with header X-Beta-User: true go to V2
+nginx.ingress.kubernetes.io/canary-by-header: "X-Beta-User"
+nginx.ingress.kubernetes.io/canary-by-header-value: "true"
+```
+
+Use cases: route your own employees first, route beta opt-in users, route users from a specific geography.
+
+### Automated Canary — Flagger
+
+In mature companies, canary promotion is fully automated using Flagger:
+
+```yaml
+apiVersion: flagger.app/v1beta1
+kind: Canary
+spec:
+  analysis:
+    interval: 1m          # check metrics every minute
+    threshold: 5          # abort after 5 failed checks
+    maxWeight: 50         # max 50% canary traffic
+    stepWeight: 10        # increase by 10% each interval
+    metrics:
+    - name: request-success-rate
+      threshold: 99       # must be > 99% success rate
+    - name: request-duration
+      threshold: 500      # must be < 500ms P99
+```
+
+Flagger automatically shifts traffic, checks metrics, promotes on success, rolls back on failure — zero human intervention after deployment.
+
+### Real Company Example — Canary
+
+**Company:** Flipkart — product recommendation engine.
+
+**Scenario:** New ML model for recommendations. Better model in theory — but will real users click more? You cannot test this in staging with fake users.
+
+**Why Canary:**
+1. Impact is unknown — only real users clicking real products gives real data
+2. Want to limit blast radius — if model is terrible, only 5% of users affected
+3. Need real A/B data — compare conversion rate V1 users vs V2 users
+
+**What happens:**
+- 5% traffic to new recommendation model
+- Monitor: click-through rate, cart additions, purchase completion
+- After 1 hour: V2 shows 12% higher click-through rate → increase to 20%
+- After 6 hours: V2 shows 8% higher revenue → increase to 50% → 100%
+- **The canary was the data.** Without it, they would never know if the model was better.
+
+### When Real Companies Use Canary
+
+- New features where user behaviour is uncertain
+- ML model upgrades (impact is data-driven)
+- Performance improvements (validate with real traffic)
+- High-risk changes on high-traffic services
+- A/B testing product features
+- Any time you need real production validation before full rollout
+
+---
+
+## The Difference Between All Three — Complete Comparison
+
+| Factor | Rolling | Blue/Green | Canary |
+|---|---|---|---|
+| How traffic switches | Gradually, pod by pod | Instantly, all at once | Gradually, by percentage |
+| Mixed versions in prod | Yes (during rollout) | No (one at a time) | Yes (intentional) |
+| Rollback speed | Minutes | Seconds | Seconds (set weight to 0%) |
+| Extra infrastructure | Minimal (maxSurge pods) | Double (full second env) | Minimal (few extra pods) |
+| User exposure to V2 | All users, gradually | Zero until switch, then all | Small % first |
+| Best for | Low-risk, frequent changes | Major/breaking releases | Risky, data-driven changes |
+| Cost | Lowest | Highest | Low |
+| Used by | All companies, daily deploys | Banks, healthcare | Netflix, Amazon, Google |
+| AzureShop | Default Helm charts | Not implemented | Phase 9 NGINX annotation |
+
+---
+
+## Visual Traffic Flow Comparison
+
+```
+ROLLING (over time):
+Time 0:  V1  V1  V1  V1         100% V1
+Time 1:  V1  V1  V1  V2         75% V1, 25% V2
+Time 2:  V1  V1  V2  V2         50%/50%
+Time 3:  V1  V2  V2  V2         25% V1, 75% V2
+Time 4:  V2  V2  V2  V2         100% V2
+(users hit both versions during rollout)
+
+BLUE/GREEN (instant switch):
+Before:  B   B   B   B          100% Blue/V1
+[Green tested in parallel with zero user traffic]
+After:   G   G   G   G          100% Green/V2
+(never mixed — instant switch)
+
+CANARY (deliberate, monitored, over hours/days):
+Hour 0:  V1  V1  V1  V1  V1    100% V1
+Hour 1:  V1  V1  V1  V1  V2    80% V1 / 20% V2
+Hour 6:  V1  V1  V2  V2  V2    40% V1 / 60% V2
+Hour 24: V2  V2  V2  V2  V2    100% V2
+(deliberate, data-driven progression)
+```
+
+---
+
+## How Real IT Companies Decide Which Strategy
+
+```
+Is this a critical service with breaking changes
+or zero tolerance for user impact?
+│
+├── YES → Blue/Green
+│         (banking app, payment service, core auth, major release)
+│
+└── NO → Is this a high-risk change where real user
+          behaviour needs validation?
+          │
+          ├── YES → Canary
+          │         (ML model, major UI change, pricing logic,
+          │          recommendation engine, A/B feature test)
+          │
+          └── NO → Routine, low-risk, backward-compatible change?
+                    │
+                    └── YES → Rolling
+                              (bug fix, dependency update,
+                               minor feature, config change)
+```
+
+**Capgemini in practice:**
+- Enterprise banking/insurance clients → Blue/Green for major releases, Rolling for daily patches
+- Digital/cloud-native projects → Canary via Flagger or NGINX weights
+- Azure DevOps release pipelines → environment gates (manual approval + monitoring window) implement all three strategies
+
+---
+
+**One-line summary for each:**
+
+> **Rolling:** Replace old pods one by one — simple, cheap, zero downtime, good for daily low-risk changes.
+>
+> **Blue/Green:** Two full environments, instant switch — expensive, instant rollback, perfect for major releases with zero user impact during transition.
+>
+> **Canary:** Small % of real traffic to new version, watch metrics, promote gradually — best for risky or data-driven changes that need real user validation before full rollout.
+
+---
+
 ### Q20. What is HPA vs VPA in Kubernetes? Which did you use?
 
 **Answer:**
