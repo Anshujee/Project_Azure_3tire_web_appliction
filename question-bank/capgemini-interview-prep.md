@@ -1293,6 +1293,397 @@ Block all traffic from order-service to the Service Bus. Expected: order-service
 
 ---
 
+### Q16.1. Give a full practical explanation of HA and DR — real examples, all four DR strategies, RPO/RTO, AzureShop mapping, and follow-up interview questions.
+
+**Answer:**
+
+## Why Do We Need HA and DR?
+
+Imagine AzureShop is running in production. Real users are buying products. Two different bad things can happen:
+
+**Scenario 1 — A single component fails:**
+One of the three AKS nodes crashes at 2pm on a Tuesday. Just one node — the rest of the cluster is fine. Azure is fine.
+
+**Scenario 2 — An entire region goes down:**
+Microsoft announces: "East US Azure region is experiencing a complete outage due to a power failure. Estimated recovery: 6 hours."
+
+These are completely different problems requiring completely different solutions:
+- Scenario 1 → **High Availability** handles this. Automatic. No human needed.
+- Scenario 2 → **Disaster Recovery** handles this. Deliberate plan. Human action needed.
+
+---
+
+## High Availability (HA) — Full Explanation
+
+### What is HA?
+
+High Availability means designing your system so that individual component failures do not cause downtime. The system keeps running automatically even when parts of it fail.
+
+> **HA Analogy — The Aeroplane**
+>
+> A commercial aircraft has two engines. If one engine fails mid-flight, the plane does not crash. It continues flying on the second engine and lands safely. The redundancy (two engines) was built in from the start. No human decides "switch to engine 2" — it happens automatically.
+>
+> **HA is that second engine built into your system.**
+
+### What HA Protects Against
+
+| Failure Type | Example | HA Mechanism |
+|---|---|---|
+| Pod crash | App throws unhandled exception, process dies | Kubernetes restarts pod automatically |
+| Node failure | VM running AKS node gets hardware fault | Pods rescheduled to other nodes |
+| Availability Zone failure | One datacenter in a region loses power | Pods on other AZ nodes take over |
+| Bad deployment | New version crashes on startup | Rolling update stops, old pods remain |
+| Traffic spike | 10x normal load hits the service | HPA adds more pods |
+
+### Key Characteristics of HA
+
+- **Scope:** Single region, multiple availability zones
+- **Recovery time:** Seconds to minutes — automatic
+- **Data loss:** Zero — HA does not involve switching databases
+- **Human intervention:** None — fully automated
+- **Cost:** Moderate — you run multiple instances always
+
+---
+
+## HA in Practice — AzureShop Deep Dive
+
+### Layer 1 — Multiple Pod Replicas
+
+Every service in AzureShop has a minimum of 2 replicas running at all times:
+
+```yaml
+spec:
+  minReplicas: 2      # always at least 2 pods running
+  maxReplicas: 10
+```
+
+If Pod A crashes, Pod B is already running and serving traffic. Kubernetes schedules a replacement. Users experience zero downtime.
+
+```
+Normal state:
+[Pod A ✅] [Pod B ✅]  ← both serving traffic
+
+Pod A crashes:
+[Pod A ❌] [Pod B ✅]  ← Pod B handles all traffic
+           [Pod C 🔄]  ← Kubernetes starts replacement
+
+60 seconds later:
+[Pod B ✅] [Pod C ✅]  ← back to 2 healthy pods
+```
+
+### Layer 2 — PodDisruptionBudget (PDB)
+
+PDB guarantees Kubernetes never takes down so many pods at once that your service goes offline — even during node upgrades:
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+spec:
+  minAvailable: 1     # at least 1 pod must always be running
+  selector:
+    matchLabels:
+      app: product-service
+```
+
+Without PDB: During a node upgrade, Kubernetes might drain a node and terminate both pods simultaneously → service down.
+
+With PDB: Kubernetes terminates Pod A, waits for the replacement to become healthy, then terminates Pod B. Service never fully down.
+
+### Layer 3 — Nodes Across Availability Zones
+
+Azure regions have multiple Availability Zones — physically separate datacenters with independent power, cooling, and networking.
+
+```
+Azure East US Region
+├── Availability Zone 1 (Datacenter A) → AKS Node 1 → product-service Pod A
+├── Availability Zone 2 (Datacenter B) → AKS Node 2 → product-service Pod B
+└── Availability Zone 3 (Datacenter C) → AKS Node 3 → order-service pods
+```
+
+If AZ1's entire datacenter loses power: Pod A dies, Pod B in AZ2 continues serving traffic, Kubernetes schedules a new pod on AZ2 or AZ3. Users: zero downtime.
+
+```hcl
+# Terraform — spread nodes across all 3 AZs
+resource "azurerm_kubernetes_cluster_node_pool" "system" {
+  zones = ["1", "2", "3"]
+}
+```
+
+### Layer 4 — Liveness and Readiness Probes
+
+```yaml
+livenessProbe:
+  httpGet:
+    path: /health    # non-200 response → Kubernetes kills and restarts pod
+    port: 8000
+  periodSeconds: 10
+
+readinessProbe:
+  httpGet:
+    path: /ready     # non-200 response → pod removed from load balancer (not killed)
+    port: 8000
+  periodSeconds: 5
+```
+
+**Liveness:** Is the pod alive? No → restart it.
+**Readiness:** Is the pod ready to serve traffic? No → remove from rotation but keep running.
+
+Real example: Order-service starts but Service Bus connection takes 15 seconds. Readiness fails during those 15 seconds — no traffic routed. Once connected, readiness passes — pod enters rotation. Users never hit a pod that cannot serve them.
+
+### Layer 5 — Azure SQL Zone-Redundant Configuration
+
+```hcl
+resource "azurerm_mssql_database" "main" {
+  zone_redundant = true    # replicas in multiple AZs
+}
+```
+
+Azure SQL automatically maintains synchronous replicas across AZs. If the AZ hosting the primary fails, Azure SQL promotes a replica automatically. Downtime: seconds.
+
+---
+
+## Disaster Recovery (DR) — Full Explanation
+
+### What is DR?
+
+DR is the plan and capability to restore your service after a catastrophic event that HA cannot handle — entire region failure, data corruption, ransomware, accidental deletion.
+
+> **DR Analogy — The Office Fire**
+>
+> Your office building (Azure region) burns down completely. No amount of "two servers in the building" helps. The building is gone.
+>
+> DR is the backup office in another city that you prepared in advance. It is not automatic — someone must activate it, systems must be brought online. But you had the plan ready, so recovery takes hours instead of months.
+>
+> **HA keeps you running when components fail. DR brings you back when everything fails.**
+
+---
+
+## The Two Most Important DR Metrics
+
+### RPO — Recovery Point Objective
+
+"How much data can we afford to lose?" — expressed as time.
+
+RPO = 1 hour means you can afford to lose up to 1 hour of data. This determines **how frequently you back up or replicate data**.
+
+```
+2:00pm  → Backup taken
+2:30pm  → 500 orders placed
+3:00pm  → DISASTER
+3:02pm  → DR activated, restored from 2:00pm backup
+
+Result: 500 orders (30 minutes of data) lost
+If RPO = 1 hour → this is within acceptable limits ✅
+```
+
+### RTO — Recovery Time Objective
+
+"How long can the service be down before serious damage?" — expressed as time.
+
+RTO = 2 hours means the business can survive a 2-hour outage. This determines **how sophisticated your DR strategy must be**.
+
+```
+3:00pm  → DISASTER
+3:05pm  → DR team assembled
+3:30pm  → Secondary region infrastructure verified
+4:00pm  → DNS switched, service restored
+
+Downtime = 1 hour → within RTO of 2 hours ✅
+```
+
+**The trade-off:**
+
+| | Lower RPO | Lower RTO |
+|---|---|---|
+| Meaning | Less data loss | Less downtime |
+| Cost | Higher (more frequent replication) | Higher (more standby infrastructure) |
+| Complexity | Higher | Higher |
+
+---
+
+## The Four DR Strategies
+
+### Strategy 1 — Backup and Restore
+
+Cheapest and slowest. Take regular backups, restore to new infrastructure when disaster strikes.
+
+```
+Primary (East US)                Secondary (West US)
+─────────────────                ───────────────────
+AKS ✅                           Nothing running
+Azure SQL ✅ ──backup──►         Backup in Blob Storage
+
+DISASTER ↓
+
+Primary: ❌                       Terraform apply → new AKS
+                                  Azure SQL restored from backup
+                                  DNS updated
+```
+
+- **RPO:** Hours | **RTO:** Hours | **Cost:** Lowest
+- **Use case:** Dev/test, non-critical workloads
+
+### Strategy 2 — Pilot Light
+
+Keep a minimal core (database replica) always running in secondary region. Scale up everything else on demand.
+
+```
+Primary (East US)                Secondary (West US)
+─────────────────                ───────────────────
+Full AKS ✅                      No AKS (saves cost)
+Azure SQL ✅ ──geo-replication──► Azure SQL replica ✅ (always in sync)
+App Gateway ✅                   No App Gateway
+
+DISASTER ↓
+
+Primary: ❌                       Terraform apply → AKS + App Gateway
+                                  SQL failover (data already there)
+                                  DNS updated
+```
+
+- **RPO:** Near zero | **RTO:** 30–60 min | **Cost:** Low
+- **Use case:** Important apps that can tolerate 30–60 min downtime
+
+### Strategy 3 — Warm Standby
+
+Secondary region always running at reduced capacity — ready to scale up quickly.
+
+```
+Primary (East US)                Secondary (West US)
+─────────────────                ───────────────────
+AKS: 10 nodes ✅                 AKS: 3 nodes ✅ (running, smaller)
+Azure SQL ✅  ──sync──►          Azure SQL replica ✅
+App Gateway ✅                   App Gateway ✅ (no live traffic)
+
+DISASTER ↓
+
+Primary: ❌                       Scale AKS 3 → 10 nodes (5 min)
+                                  SQL failover (instant)
+                                  DNS switched
+```
+
+- **RPO:** Near zero | **RTO:** 5–15 min | **Cost:** Medium
+- **Use case:** Business-critical apps, SLA requires < 15 min RTO
+
+### Strategy 4 — Active-Active
+
+Both regions fully running and serving live traffic simultaneously. No failover needed.
+
+```
+Primary (East US)                Secondary (West US)
+─────────────────                ───────────────────
+AKS: 10 nodes ✅                 AKS: 10 nodes ✅
+Azure SQL ✅  ←──geo-sync──►     Azure SQL ✅ (both read-write)
+
+Azure Front Door (global load balancer)
+├── 50% traffic → East US
+└── 50% traffic → West US
+
+DISASTER in East US ↓
+
+Front Door health probe detects East US unhealthy
+100% traffic automatically → West US
+Users: zero downtime, zero data loss
+```
+
+- **RPO:** Zero | **RTO:** Seconds | **Cost:** Highest (double infrastructure)
+- **Use case:** Mission-critical — banking, healthcare, large e-commerce
+
+---
+
+## HA vs DR — The Major Differences
+
+| Factor | High Availability | Disaster Recovery |
+|---|---|---|
+| What it handles | Individual component failures | Catastrophic regional failures |
+| Scope | Single region, multiple AZs | Multiple regions |
+| Recovery trigger | Automatic | Manual or semi-manual (DR runbook) |
+| Recovery time | Seconds to minutes | Minutes to hours |
+| Data loss | Zero | Depends on RPO |
+| Always running? | Yes — redundancy always active | Depends on strategy |
+| Cost | Moderate | Low to very high |
+| Who activates? | Nobody — automatic | On-call engineer + DR runbook |
+| AzureShop example | HPA, PDB, multi-AZ nodes, health probes | SQL geo-replication, secondary region Terraform |
+
+> **HA = Redundancy within the same city.**
+> Two fire stations in Mumbai. If one is busy, the other responds automatically.
+>
+> **DR = Backup city.**
+> If Mumbai is hit by a flood, operations move to Pune. Takes time to activate — but the plan was ready.
+
+---
+
+## AzureShop — HA Implemented, DR Designed
+
+**HA — fully implemented:**
+- Min 2 replicas per service (HPA)
+- PodDisruptionBudget on all services
+- Liveness and readiness probes on all pods
+- Multi-AZ node pool (`zones = ["1", "2", "3"]`)
+- Azure SQL with `zone_redundant = true`
+
+**DR — designed but not implemented (honest interview answer):**
+
+For production DR on AzureShop (Pilot Light strategy):
+
+```
+Primary: West US 2
+Secondary: East US
+
+Data replication:
+├── Azure SQL → geo-replication (async, RPO ~5 seconds)
+├── Redis → geo-replication
+├── ACR Premium → geo-replication (images in both regions)
+└── Terraform state → RA-GRS storage account (geo-redundant)
+
+Compute (spun up on demand via Terraform):
+├── Secondary AKS cluster
+├── Secondary App Gateway
+└── Secondary Key Vault (always running — needed for secrets)
+
+DNS failover:
+└── Azure Front Door → health probe primary region
+    → if unhealthy, route 100% to secondary
+```
+
+Honest answer for interview: "AzureShop is single-region — it has full HA via AKS multi-AZ and pod redundancy. For production DR I would implement a Pilot Light strategy with Azure SQL geo-replication as the always-on component and Terraform to provision AKS on demand in the secondary region. RPO would be near-zero, RTO approximately 30 minutes."
+
+---
+
+## Follow-Up Interview Questions
+
+**Q: What is the difference between RPO and RTO?**
+RPO is about data — how much data loss is acceptable (drives replication frequency). RTO is about time — how long can the service be down (drives standby infrastructure complexity).
+
+**Q: Can you have HA without DR?**
+Yes. AzureShop has HA but no DR. HA only protects within the region. A complete regional failure bypasses all HA mechanisms.
+
+**Q: Can you have DR without HA?**
+Technically yes, but bad practice. If a single pod failure brings down your primary, you would trigger DR failovers for routine failures. Always implement HA first.
+
+**Q: What is Active-Active vs Active-Passive?**
+Active-Active: both regions serve live traffic simultaneously, failover is instant, zero RPO.
+Active-Passive: primary serves all traffic, secondary is on standby, some RTO required to switch.
+
+**Q: How do you test a DR plan?**
+1. Tabletop exercise — walk through runbook without actual failover, find documentation gaps.
+2. Partial failover test — fail over one non-critical service, verify, fail back.
+3. Full DR drill — simulate complete region failure, execute full runbook, measure actual RTO/RPO vs targets.
+4. Chaos Studio — inject region-level failures in staging.
+
+Rule: An untested DR plan is not a DR plan. Test quarterly for critical systems.
+
+**Q: What Azure services support geo-replication?**
+Azure SQL (active geo-replication), Azure Cosmos DB (multi-region writes), Azure Cache for Redis (geo-replication — Premium SKU), ACR (geo-replication — Premium SKU), Azure Storage (RA-GRS, RA-GZRS), Azure Service Bus (Geo-Disaster Recovery pairing).
+
+---
+
+**One-line summary for the interview:**
+
+> High Availability keeps your service running during individual component failures through automatic redundancy within a region. Disaster Recovery brings your service back after a catastrophic regional failure through a pre-planned, multi-region strategy guided by RPO (maximum data loss) and RTO (maximum downtime).
+
+---
+
 ## Section 3 — DevOps & CI/CD (Q17–Q24)
 
 ---
