@@ -3103,6 +3103,157 @@ User
 
 ---
 
+### Q22.4. Where are you defining path-based routing? Which configuration file? What exactly are you defining in ingress.yaml?
+
+**Answer:**
+
+---
+
+## Where and Which File?
+
+Path-based routing is defined in **`k8s/ingress/dev-ingress.yaml`** — a Kubernetes `Ingress` resource.
+
+Two ingress files exist in AzureShop:
+
+| File | Purpose |
+|------|---------|
+| `k8s/ingress/dev-ingress.yaml` | Main routing for all traffic in the dev namespace |
+| `k8s/ingress/canary-example.yaml` | Phase 9 canary — splits 20% of traffic to a new version |
+| `k8s/ingress-nginx-values.yaml` | Helm values for installing the NGINX controller itself (not routing) |
+
+---
+
+## What is Defined in dev-ingress.yaml — Section by Section
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+```
+Tells Kubernetes this is an Ingress resource — a routing rule object that the NGINX controller will read and act on.
+
+---
+
+```yaml
+metadata:
+  name: azureshop-ingress
+  namespace: dev
+```
+Names this Ingress `azureshop-ingress` and places it in the `dev` namespace — the same namespace where all AzureShop pods run. An Ingress only applies to services in its own namespace.
+
+---
+
+```yaml
+annotations:
+  kubernetes.io/ingress.class: "nginx"
+  nginx.ingress.kubernetes.io/use-regex: "true"
+  nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+  nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+```
+Instructions specifically for the NGINX controller:
+
+| Annotation | What it does |
+|------------|-------------|
+| `ingress.class: nginx` | Tells Kubernetes which Ingress Controller handles this rule — important if multiple controllers exist |
+| `use-regex: true` | Enables regex pattern matching in path rules |
+| `proxy-read-timeout: 60` | Wait up to 60 seconds for a backend response before timing out — important for slow services like order processing |
+| `proxy-send-timeout: 60` | Wait up to 60 seconds for the backend to accept the request |
+
+---
+
+```yaml
+spec:
+  ingressClassName: nginx
+  rules:
+    - http:
+        paths:
+          - path: /api/
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000
+```
+
+Two routing rules:
+- All `/api/` traffic → `api-gateway` service on port 8080
+- Everything else → `frontend` service on port 3000
+
+`pathType: Prefix` means the path must **start with** `/api/` — not an exact match.
+
+---
+
+## The Two-Level Routing — Most Candidates Miss This
+
+NGINX Ingress does NOT route directly to individual microservices in AzureShop. It routes to the `api-gateway` first. The api-gateway then routes internally:
+
+```
+NGINX Ingress (dev-ingress.yaml)       api-gateway (nginx.conf inside cluster)
+────────────────────────────────       ──────────────────────────────────────
+/api/* → api-gateway:8080        →     /api/users     → user-service:3001
+/      → frontend:3000                 /api/products  → product-service:8000
+                                       /api/cart      → cart-service:3002
+                                       /api/orders    → order-service:3003
+                                       /api/payments  → payment-service:3004
+```
+
+**Why two levels?**
+- NGINX Ingress handles external-to-cluster routing
+- api-gateway handles internal routing and can add: auth header injection, rate limiting, request transformation — before the request reaches any microservice
+
+---
+
+## canary-example.yaml — What it Defines
+
+```yaml
+# Stable ingress — 80% traffic
+metadata:
+  name: user-service-stable
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /api/users
+            backend:
+              service:
+                name: user-service
+
+---
+# Canary ingress — 20% traffic
+metadata:
+  name: user-service-canary
+  annotations:
+    nginx.ingress.kubernetes.io/canary: "true"
+    nginx.ingress.kubernetes.io/canary-weight: "20"
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /api/users
+            backend:
+              service:
+                name: user-service-canary
+```
+
+Two Ingress objects share the same path. NGINX automatically splits traffic: 80% to `user-service`, 20% to `user-service-canary`. No code change — just annotations.
+
+To rollback: delete the canary Ingress. All traffic instantly returns to stable.
+
+---
+
+## Interview Answer — Say Exactly This
+
+> "Path-based routing is defined in `k8s/ingress/dev-ingress.yaml` — a Kubernetes Ingress resource. In that file I define: the ingress class as nginx so the correct controller picks it up, timeout annotations so slow services like order-service don't time out prematurely, and two routing rules — all `/api/` traffic goes to the api-gateway on port 8080, and everything else goes to the frontend on port 3000. The api-gateway then handles a second level of routing internally to the individual microservices. I also have `canary-example.yaml` which uses the NGINX canary-weight annotation to split 20% of `/api/users` traffic to a canary deployment — this was used in Phase 9. Rollback is instant — just delete the canary Ingress object."
+
+---
+
 ### Q23. What is Azure Container Registry (ACR)? Why did you use Premium SKU?
 
 **Answer:**
