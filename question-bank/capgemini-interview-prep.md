@@ -2606,6 +2606,139 @@ Now to deploy: `helm upgrade --install product-service ./helm/product-service -f
 
 ---
 
+### Q21.1. What is the difference between StatefulSet and DaemonSet? Is Node Exporter a Deployment or DaemonSet, and why? Do we get one Node Exporter per node?
+
+**Answer:**
+
+---
+
+## The Three Ways to Run Pods in Kubernetes
+
+| Kind | Purpose | Identity |
+|------|---------|----------|
+| **Deployment** | Stateless apps — any pod serves any request | Random pod names |
+| **StatefulSet** | Stateful apps — each pod has fixed identity and its own storage | Stable: pod-0, pod-1, pod-2 |
+| **DaemonSet** | Infrastructure agents — exactly one pod per node, always | One per node |
+
+---
+
+## StatefulSet — Pods With Stable Identity
+
+**The problem it solves:**
+
+Imagine running a Redis cluster with 3 pods using a normal Deployment. Pods get random names: `redis-abc`, `redis-xyz`, `redis-def`. If one dies, Kubernetes replaces it with a new random name on possibly a different node. Redis cluster breaks — nodes identify each other by stable hostname.
+
+StatefulSet solves this by giving each pod a **stable, predictable identity:**
+
+```
+redis-0   → always pod 0, always same PersistentVolume
+redis-1   → always pod 1, always same PersistentVolume
+redis-2   → always pod 2, always same PersistentVolume
+```
+
+**Key properties:**
+- Pods created in order: `pod-0` first, then `pod-1`, then `pod-2`
+- Pods deleted in reverse order: `pod-2` first
+- Each pod gets its own PersistentVolumeClaim — storage follows the pod even after restart
+- Stable DNS name: `redis-0.redis-headless.default.svc.cluster.local`
+
+**Used for:** Databases (MySQL, MongoDB, Cassandra), message brokers (Kafka, RabbitMQ, Zookeeper), search engines (Elasticsearch)
+
+---
+
+## DaemonSet — One Pod Per Node, Always
+
+**The problem it solves:**
+
+You want to collect system-level metrics from every node in your AKS cluster. If you use a Deployment with 3 replicas on a 5-node cluster, 2 nodes have no collector. If the cluster scales to 10 nodes, you still only have 3 collectors — missing 7 nodes.
+
+DaemonSet guarantees **exactly one pod on every node automatically:**
+
+```
+Node 1 → node-exporter pod  ← automatic
+Node 2 → node-exporter pod  ← automatic
+Node 3 → node-exporter pod  ← automatic
+New node added → node-exporter pod  ← automatic
+Node removed → pod automatically deleted
+```
+
+You never scale a DaemonSet manually. It scales itself with the cluster.
+
+**YES — one Node Exporter pod per node. Always. That is the point of DaemonSet.**
+
+**Used for:** Log collectors (Fluentd, Filebeat), monitoring agents (node-exporter), network plugins (CNI agents), security scanners
+
+---
+
+## Node Exporter — DaemonSet, Not Deployment
+
+**Node Exporter is deployed as a DaemonSet.**
+
+**Why DaemonSet specifically?**
+
+Node Exporter collects **node-level metrics** — CPU usage, memory, disk I/O, network per node. These are hardware/OS level metrics that only make sense per physical node. Each node must report its own metrics independently.
+
+If node-exporter ran as a Deployment with 2 replicas on a 5-node cluster:
+- 3 nodes report no metrics to Prometheus
+- Your Grafana CPU/memory panels show incomplete data
+- Alerts fire incorrectly — "Node X has no data" because no collector is running there
+
+With DaemonSet: every node always has a collector. Prometheus always has complete cluster-wide data.
+
+---
+
+## AzureShop — Exactly Where This Appears in Your Project
+
+**DaemonSet — node-exporter in your Phase 7 monitoring stack:**
+
+When you ran `helm install kube-prometheus-stack` in Phase 7, it automatically deployed `node-exporter` as a DaemonSet across all your AKS nodes:
+
+```bash
+kubectl get daemonset -n monitoring
+# NAME                                    DESIRED   CURRENT   READY
+# kube-prometheus-stack-prometheus-node-exporter   3   3   3
+```
+
+The `3` means 3 nodes → 3 node-exporter pods — one per node. If your cluster scaled to 5 nodes, it would automatically show `5`.
+
+This node-exporter data feeds directly into:
+- Your Grafana dashboard CPU panel
+- Your Grafana dashboard memory panel
+- Your PrometheusRule alerts for high CPU and memory
+
+**StatefulSet — deliberately NOT used in AzureShop:**
+
+All 8 AzureShop services (user-service, product-service, cart-service, etc.) use **Deployments** — not StatefulSets. This was a deliberate architecture decision.
+
+The reason: you offloaded all stateful workloads to **managed Azure services:**
+
+```
+State lives here:          Not in Kubernetes pods
+─────────────────          ─────────────────────
+Azure SQL            ←     user-service, order-service data
+Azure Cache for Redis ←    cart-service session data
+Azure Cosmos DB      ←     product-service catalog data
+Azure Service Bus    ←     order → payment → notification events
+```
+
+Because Azure manages persistence, replication, and failover for your databases, your AKS pods have no state to protect. Any pod can be killed and replaced instantly — they just reconnect to Azure SQL on startup.
+
+> **This is the right production pattern.** Running stateful databases inside Kubernetes (StatefulSet) is complex — you manage replication, backups, failover yourself. Using managed Azure services offloads that complexity entirely.
+
+---
+
+## Interview Answer — Say This
+
+**"What is the difference between StatefulSet and DaemonSet?"**
+
+> "A Deployment runs stateless pods that are interchangeable. A StatefulSet is for apps that need stable identity and persistent storage — like databases. Each pod gets a fixed name (pod-0, pod-1) and its own PersistentVolume that survives restarts. A DaemonSet ensures exactly one pod runs on every node in the cluster — used for node-level infrastructure agents like log collectors and monitoring exporters. In AzureShop, all 8 application services use Deployments because they are stateless — all state lives in managed Azure services like SQL and Redis. DaemonSet is used by node-exporter from kube-prometheus-stack, which runs on every AKS node to collect CPU, memory, and disk metrics for our Grafana dashboards."
+
+**"Is Node Exporter a Deployment or DaemonSet? Do we get one per node?"**
+
+> "Node Exporter is a DaemonSet. Yes — exactly one pod per node, always. This is required because node-exporter collects hardware-level metrics that are specific to each node. If it ran as a Deployment, some nodes would have no collector and Prometheus would have gaps in its data. In AzureShop, our 3-node AKS cluster had 3 node-exporter pods — one per node — which fed CPU and memory data into our Grafana dashboards and PrometheusRule alerts."
+
+---
+
 ### Q22. What is an Ingress Controller? How did you configure it in AzureShop?
 
 **Answer:**
@@ -2653,6 +2786,62 @@ Internet → Application Gateway (WAF, SSL termination)
 **SSL:** TLS termination at Application Gateway. Traffic from App Gateway to NGINX is HTTP (inside private VNet — acceptable). For strict end-to-end TLS, you would also configure TLS on the Ingress using cert-manager + Let's Encrypt.
 
 **Interview tip:** They may ask about AGIC (Application Gateway Ingress Controller). AGIC replaces NGINX — it makes Application Gateway itself act as the Kubernetes Ingress Controller. Traffic goes directly from App Gateway to pods — no intermediate NGINX hop. Lower latency, one less component. The trade-off: AGIC is Azure-specific (NGINX is portable) and has some Helm chart limitations.
+
+---
+
+### Q22.1. Which Ingress Controller did you use in AzureShop and why?
+
+**Answer:**
+
+We used **NGINX Ingress Controller** in AzureShop.
+
+**Why NGINX specifically?**
+
+| Reason | Detail |
+|--------|--------|
+| **Open source and portable** | NGINX Ingress works on any Kubernetes cluster — AKS, EKS, GKE, on-premises. Not locked to Azure |
+| **Mature and battle-tested** | Industry standard, huge community, well-documented |
+| **Rich routing rules** | Path-based routing, host-based routing, regex, rewrite rules — all supported |
+| **Canary deployments** | NGINX supports weight-based traffic splitting using annotations — we used this in Phase 9 for canary deployments |
+| **Easy to install** | Single Helm chart: `helm install ingress-nginx ingress-nginx/ingress-nginx` |
+
+**How we deployed it in AzureShop:**
+
+```bash
+helm install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx \
+  --create-namespace \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz
+```
+
+This created an Azure Load Balancer with the external IP `134.33.223.224` — the single entry point for all traffic into AzureShop.
+
+**The full traffic flow in AzureShop:**
+```
+User browser
+  → Internet
+  → Azure Application Gateway (WAF, SSL termination, public IP)
+  → NGINX Ingress Controller (134.33.223.224, path-based routing)
+  → Kubernetes ClusterIP Service
+  → Pod
+```
+
+**Why two layers (App Gateway + NGINX)?**
+
+- **Application Gateway** handles: WAF (Web Application Firewall), SSL termination, DDoS protection — Azure-managed security at the edge
+- **NGINX** handles: Kubernetes-aware path routing, canary traffic splitting, rewriting — internal cluster routing
+
+**Alternatives considered:**
+
+| Option | Why not chosen |
+|--------|---------------|
+| **AGIC (App Gateway Ingress Controller)** | Azure-specific, less flexible for canary deployments, tighter coupling to Azure |
+| **Traefik** | Good option but less common in Azure environments |
+| **Istio Gateway** | Full service mesh — overkill for AzureShop's scale |
+
+**Interview answer:**
+
+> "In AzureShop we used NGINX Ingress Controller deployed via Helm into the `ingress-nginx` namespace. It created an Azure Load Balancer with external IP `134.33.223.224`. All external traffic enters through Azure Application Gateway first — which handles WAF and SSL termination — then forwards to NGINX which does path-based routing to the correct backend service. We chose NGINX because it is portable, supports canary weight-based splitting which we used in Phase 9, and is the industry standard for Kubernetes ingress."
 
 ---
 
