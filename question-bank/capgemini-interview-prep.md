@@ -4429,3 +4429,222 @@ Pods never talk to each other by IP. Always by Service name.
 ## Interview Answer — Say Exactly This
 
 > "Yes, two pods CAN communicate directly using pod IPs — every pod gets its own IP in Kubernetes. But pod IPs are temporary — when a pod restarts it gets a completely new IP. So direct pod-to-pod communication breaks on every restart. A Kubernetes Service solves this with a stable ClusterIP that never changes, automatic load balancing across all pods behind it, and a DNS name so pods find each other by name not IP. In AzureShop, all 8 microservices have ClusterIP Services. Order-service calls user-service at `http://user-service:3001` — never by pod IP. The NGINX Ingress Controller has a LoadBalancer type Service which caused Azure to provision a public Load Balancer and assign external IP `134.33.223.224`."
+
+---
+
+### Q43. Which observability and monitoring tools are you using? Is ELK Stack used? What is Kibana? What is Prometheus? What are Node Exporters? What Grafana visualizations? Where is log analysis done? Are you actually using these tools?
+
+**Answer:**
+
+---
+
+## The Full AzureShop Monitoring Stack
+
+AzureShop uses two parallel monitoring stacks — Azure-native and open-source:
+
+```
+AzureShop Monitoring Stack
+│
+├── Azure-Native (managed by Azure, provisioned via Terraform)
+│   ├── Log Analytics Workspace (law-azureshop-dev)
+│   │   └── Central store for ALL logs — AKS, App Insights, Azure resources
+│   ├── Application Insights × 8 (appi-*-dev)
+│   │   └── One per microservice — APM, request tracing, exceptions
+│   └── Azure Managed Grafana (grafana-azureshop-dev, Standard SKU)
+│       └── Dashboards connected to Log Analytics and Prometheus
+│
+└── Open-Source (deployed inside AKS via Helm — kube-prometheus-stack)
+    ├── Prometheus       — metrics collection and time-series storage
+    ├── node-exporter    — node-level metrics (DaemonSet — one per node)
+    ├── kube-state-metrics — Kubernetes object metrics (pod count, HPA state)
+    ├── Alertmanager     — routes alerts to email/Slack/PagerDuty
+    └── Grafana          — visualization of Prometheus metrics
+```
+
+**Why two stacks?**
+
+| Stack | Best for |
+|-------|---------|
+| Azure Monitor / App Insights | Application traces, exceptions, request details, Azure resource logs |
+| Prometheus + Grafana | Infrastructure metrics, custom business metrics, Kubernetes cluster health |
+
+---
+
+## Is ELK Stack Used? No — and Here Is Why
+
+ELK = **Elasticsearch + Logstash + Kibana** — a popular open-source log management stack.
+
+AzureShop uses the **Azure-native equivalent instead:**
+
+| ELK Component | AzureShop Equivalent |
+|--------------|---------------------|
+| Logstash (log collection) | Azure Monitor Agent / Container Insights |
+| Elasticsearch (log storage + search) | Log Analytics Workspace |
+| Kibana (visualization + search UI) | Application Insights portal + KQL queries |
+
+**Why Azure-native over ELK:**
+1. No Elasticsearch cluster to maintain — fully managed by Azure
+2. Native AKS integration — Container Insights auto-collects pod logs
+3. One place to query everything — Azure resources, AKS logs, app traces all in one workspace using KQL
+4. Cost — cheaper than running a production-grade Elasticsearch cluster at our scale
+
+---
+
+## What is Kibana?
+
+Kibana is the visualization and search UI for the ELK stack. It sits on top of Elasticsearch and lets you search logs, build dashboards, and set up alerts.
+
+**In AzureShop we do not use Kibana.** The equivalent is:
+- **Application Insights portal** — search and visualize application traces per service
+- **Log Analytics workspace** — write KQL queries to search across all logs
+
+KQL example — find all 500 errors in the last hour:
+```kusto
+ContainerLog
+| where TimeGenerated > ago(1h)
+| where LogEntry contains "500"
+| project TimeGenerated, ContainerName, LogEntry
+| order by TimeGenerated desc
+```
+
+---
+
+## What is Prometheus?
+
+Prometheus is an open-source metrics collection and time-series database.
+
+**How it works — pull model:**
+```
+Every 15 seconds (scrape interval):
+Prometheus → GET http://user-service:3001/metrics
+           → GET http://product-service:8000/metrics
+           → GET http://node-exporter:9100/metrics
+           → stores all metrics with timestamp in its time-series DB
+```
+
+**What /metrics looks like on AzureShop services:**
+```
+# TYPE http_requests_total counter
+http_requests_total{service="user-service",status_code="200"} 1547
+http_requests_total{service="user-service",status_code="500"} 3
+
+# TYPE http_request_duration_seconds histogram
+http_request_duration_seconds_bucket{service="user-service",le="0.1"} 1200
+http_request_duration_seconds_bucket{service="user-service",le="1.0"} 1547
+```
+
+**In AzureShop:** `prom-client` (Node.js) and `prometheus-client` (Python) were added to all 8 services. Each exposes `/metrics`. Prometheus scrapes all 8 every 15 seconds.
+
+Deployed via Helm:
+```bash
+helm install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+  --namespace monitoring --create-namespace
+```
+
+---
+
+## What Are Node Exporters?
+
+node-exporter is a **DaemonSet** — one pod per AKS node — that collects OS and hardware level metrics and exposes them at port `9100/metrics`.
+
+```bash
+kubectl get daemonset -n monitoring
+# NAME                                                    DESIRED  CURRENT
+# kube-prometheus-stack-prometheus-node-exporter          3        3
+```
+
+3 nodes → 3 node-exporter pods — one per node.
+
+**What it collects:**
+```
+node_cpu_seconds_total           ← CPU usage per core
+node_memory_MemAvailable_bytes   ← available memory
+node_disk_io_time_seconds_total  ← disk I/O
+node_network_receive_bytes_total ← network traffic in
+node_filesystem_avail_bytes      ← disk space remaining
+```
+
+This data powers the CPU and memory panels in your Grafana dashboard. Application Insights tells you about your app. node-exporter tells you about the machine the app runs on.
+
+---
+
+## Grafana Visualizations — 6 Panels in AzureShop Dashboard
+
+Dashboard file: `k8s/grafana-dashboards/azureshop-services.json`
+
+| Panel | Type | Data Source | What It Shows |
+|-------|------|------------|---------------|
+| **Request Rate** | Time series graph | Prometheus | HTTP requests/sec per service |
+| **Error Rate** | Time series graph | Prometheus | % of 5xx responses per service |
+| **P95 Latency** | Time series graph | Prometheus | 95th percentile response time |
+| **Pod Count** | Stat (number) | Prometheus | Running pods per service |
+| **CPU Usage** | Time series graph | node-exporter | CPU % per AKS node |
+| **Memory Usage** | Time series graph | node-exporter | Memory % per AKS node |
+
+Example PromQL for P95 latency panel:
+```promql
+histogram_quantile(0.95,
+  sum(rate(http_request_duration_seconds_bucket{namespace="dev"}[5m]))
+  by (service, le)
+)
+```
+
+Azure Managed Grafana was provisioned via Terraform with `Monitoring Reader` role on the resource group — it reads metrics from all Azure resources automatically.
+
+---
+
+## Where Exactly Is Log Analysis Done?
+
+Three places, each for a different type of data:
+
+**1. Application Insights — per-service application logs and traces**
+- Traces, exceptions, request/response details for all 8 services
+- Application Insights SDK added to every service
+- Connection strings stored in Key Vault, injected as `APPINSIGHTS_CONNECTION_STRING`
+- Query in Azure portal — see which requests failed, how long queries took
+
+**2. Log Analytics Workspace — Kubernetes control plane logs**
+- AKS diagnostic settings (in `main.tf`) send these logs:
+  - `kube-apiserver`, `kube-controller-manager`, `kube-scheduler`
+  - `kube-audit` (who did what on the cluster)
+  - `cluster-autoscaler`
+- Container Insights sends all pod stdout/stderr here
+
+**3. Prometheus + Grafana — metrics (not logs)**
+- Prometheus stores metrics (numbers over time), not log text
+- Grafana visualizes those metrics in dashboards
+- Alertmanager fires alerts when thresholds are crossed
+
+```
+Data type               → Where it goes
+────────────────────────────────────────────
+App logs (text)         → Application Insights
+K8s control plane logs  → Log Analytics Workspace
+Pod stdout/stderr       → Log Analytics (Container Insights)
+Metrics (numbers)       → Prometheus → Grafana
+Alerts                  → Alertmanager → email/Slack
+```
+
+---
+
+## Are You Actually Using These Tools or Only Aware of Concepts?
+
+**Yes — actually implemented, not just read about.**
+
+Evidence from AzureShop:
+- Added Application Insights SDK to all 8 services — connection strings stored in Key Vault
+- Deployed `kube-prometheus-stack` via Helm into `monitoring` namespace
+- Added `/metrics` endpoint to all 8 services using `prom-client` (Node.js) and `prometheus-client` (Python FastAPI)
+- Built Grafana dashboard with 6 panels in `k8s/grafana-dashboards/azureshop-services.json`
+- Wrote 10 PrometheusRule alerts in 3 groups in `k8s/alert-rules/azureshop-alerts.yaml`:
+  - **HTTP group:** HighErrorRate (>5% 5xx), HighP95Latency (>1s), ServiceReceivingNoTraffic
+  - **Availability group:** PodCrashLoopBackOff, PodNotRunning, DeploymentUnavailable, PodUnschedulable
+  - **Capacity group:** HPAAtMaxReplicas, HighMemoryUsage (>85%), HighCPUThrottling (>25%)
+- Provisioned Log Analytics Workspace and Azure Managed Grafana via Terraform
+- Configured AKS diagnostic settings to forward control plane logs to Log Analytics
+
+---
+
+## Interview Answer — Say Exactly This
+
+> "In AzureShop I implemented two monitoring stacks. The Azure-native stack uses Log Analytics Workspace as the central log store, Application Insights for each of the 8 microservices for APM and tracing, and Azure Managed Grafana provisioned via Terraform. The open-source stack uses kube-prometheus-stack deployed via Helm — that brings up Prometheus, Alertmanager, node-exporter as a DaemonSet on every node, and kube-state-metrics. I added `/metrics` endpoints to all 8 services using prom-client and prometheus-client. I do not use ELK Stack — Azure Monitor is the equivalent and integrates natively with AKS. Kibana's equivalent in our setup is Application Insights portal and Log Analytics KQL queries. I built a Grafana dashboard with 6 panels covering request rate, error rate, P95 latency, pod count, CPU and memory. I wrote 10 PrometheusRule alerts in 3 groups — HTTP-level, availability, and capacity. For log analysis: application logs go to Application Insights, Kubernetes control plane logs go to Log Analytics, and metrics go to Prometheus and Grafana."
