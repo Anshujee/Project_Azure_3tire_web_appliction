@@ -2845,6 +2845,124 @@ User browser
 
 ---
 
+### Q22.2. Have you configured an Ingress Controller in AKS/Azure? Through what method did you deploy it?
+
+**Answer:**
+
+---
+
+## This is a "Prove You Did It" Question
+
+The interviewer is not asking what an Ingress Controller is — they already know. They want to confirm you have real hands-on experience, not just theory. Your answer must be specific — exact commands, exact IPs, exact namespaces.
+
+---
+
+## Yes — Here Is Exactly What Was Done in AzureShop
+
+**Method: Helm**
+
+NGINX Ingress Controller was deployed using Helm — the standard package manager for Kubernetes.
+
+**Step 1 — Add the Helm repo and install:**
+```bash
+helm repo add ingress-nginx https://kubernetes.github.io/ingress-nginx
+helm repo update
+
+helm install ingress-nginx ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx \
+  --create-namespace \
+  --set controller.service.annotations."service\.beta\.kubernetes\.io/azure-load-balancer-health-probe-request-path"=/healthz
+```
+
+**Why that annotation?** Azure Load Balancer needs a health probe path to mark the backend as healthy. Without it, the Load Balancer marks NGINX as unhealthy and drops all traffic.
+
+**Step 2 — Verify the external IP was assigned:**
+```bash
+kubectl get svc -n ingress-nginx
+# NAME                       TYPE           EXTERNAL-IP      PORT(S)
+# ingress-nginx-controller   LoadBalancer   134.33.223.224   80:32080/TCP,443:32443/TCP
+```
+
+Azure automatically provisioned a Load Balancer and assigned external IP `134.33.223.224` — the single entry point for all traffic into AzureShop.
+
+**Step 3 — Created Ingress resources with path-based routing:**
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: azureshop-ingress
+  namespace: dev
+  annotations:
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+  - host: shop.example.com
+    http:
+      paths:
+      - path: /api/users
+        pathType: Prefix
+        backend:
+          service:
+            name: user-service
+            port:
+              number: 3001
+      - path: /api/products
+        pathType: Prefix
+        backend:
+          service:
+            name: product-service
+            port:
+              number: 8000
+      - path: /api/orders
+        pathType: Prefix
+        backend:
+          service:
+            name: order-service
+            port:
+              number: 3003
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: frontend
+            port:
+              number: 3000
+```
+
+**Step 4 — Application Gateway in front of NGINX:**
+```
+User → Internet → Application Gateway (SSL, WAF) → NGINX (134.33.223.224) → ClusterIP Service → Pod
+```
+
+**Step 5 — Used NGINX canary annotations in Phase 9:**
+```yaml
+annotations:
+  nginx.ingress.kubernetes.io/canary: "true"
+  nginx.ingress.kubernetes.io/canary-weight: "20"
+```
+This split 20% of traffic to the canary deployment — no code change, just an annotation.
+
+---
+
+## Why Helm Over Raw kubectl apply?
+
+| | Helm | kubectl apply (raw YAML) |
+|--|------|--------------------------|
+| Installation | Single command | Must apply 10+ YAML files manually |
+| Upgrades | `helm upgrade` | Must track which files changed |
+| Rollback | `helm rollback` | No built-in rollback |
+| Versioning | Versioned releases | No version tracking |
+
+Helm is the standard way to install complex third-party tools like NGINX Ingress, Prometheus, and cert-manager in Kubernetes.
+
+---
+
+## Interview Answer — Say Exactly This
+
+> "Yes, I configured NGINX Ingress Controller in AzureShop on AKS. I deployed it using Helm — `helm install ingress-nginx ingress-nginx/ingress-nginx` into the `ingress-nginx` namespace. I had to include the Azure Load Balancer health probe annotation otherwise the Load Balancer marks NGINX as unhealthy and drops all traffic. After installation, Azure assigned external IP `134.33.223.224` as the single entry point for the cluster. I created Ingress resources with path-based routing to direct traffic to each of the 8 microservices. Azure Application Gateway sits in front handling SSL termination and WAF. In Phase 9 I also used NGINX canary weight annotations to split 20% of traffic to a canary deployment without any code changes."
+
+---
+
 ### Q23. What is Azure Container Registry (ACR)? Why did you use Premium SKU?
 
 **Answer:**
