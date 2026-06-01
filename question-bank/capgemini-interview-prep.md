@@ -4044,3 +4044,254 @@ Topics not in AzureShop but in the JD. Learn these conceptually:
 ---
 
 *Total: 40 questions across 6 JD sections. Review all 40, mark uncertain ones, revisit before the mock interview.*
+
+---
+
+## Section 7 — Real Interview Questions (From Live Interviews)
+
+---
+
+### Q41. A pod goes into CrashLoopBackOff. How do you troubleshoot it? Walk me through step by step with real examples from your project.
+
+**Answer:**
+
+---
+
+## What is CrashLoopBackOff?
+
+Pod starts → crashes → Kubernetes restarts it → crashes again → Kubernetes waits longer before next restart (backoff). The wait grows: 10s → 20s → 40s → 80s → 160s → 300s (max 5 minutes). This keeps repeating until you fix the root cause.
+
+**CrashLoopBackOff is NOT the problem. It is a symptom. The real problem is WHY the pod is crashing.**
+
+---
+
+## Step-by-Step Troubleshooting
+
+### Step 1 — See which pod is affected
+```bash
+kubectl get pods -n dev
+```
+```
+NAME                              READY   STATUS             RESTARTS
+api-gateway-7d9f8b-xkp2q         0/1     CrashLoopBackOff   8
+product-service-5c6d9f-mnp3r     1/1     Running            0
+```
+High RESTARTS count = has been crashing for a while.
+
+### Step 2 — Describe the pod (most important command)
+```bash
+kubectl describe pod api-gateway-7d9f8b-xkp2q -n dev
+```
+Look at:
+- **Events** at the bottom — what Kubernetes tried to do
+- **Last State** — exit code of the previous crash
+
+```
+Last State:
+  Terminated:
+    Reason: Error
+    Exit Code: 1          ← tells you WHY it crashed
+    Finished: 10:05:01    ← died after 1 second = startup crash
+```
+
+**Exit codes — know these:**
+
+| Exit Code | Meaning |
+|-----------|---------|
+| `1` | Application error — check logs |
+| `137` | OOMKilled — pod ran out of memory |
+| `139` | Segmentation fault — application bug |
+| `143` | SIGTERM — pod was gracefully terminated |
+
+### Step 3 — Get logs from the PREVIOUS crash (most useful)
+```bash
+kubectl logs <pod-name> -n dev --previous
+```
+`--previous` gets logs from the container that just crashed — not the current waiting one. **This is the key command for CrashLoopBackOff.**
+
+### Step 4 — Check current logs
+```bash
+kubectl logs <pod-name> -n dev
+```
+
+### Step 5 — Check if secrets are mounting correctly
+```bash
+kubectl describe pod <pod-name> -n dev | grep -A5 "Volumes"
+kubectl get secretproviderclass -n dev
+```
+If a secret fails to mount, the pod never starts — appears as CrashLoopBackOff.
+
+### Step 6 — Check resource limits (for OOMKilled)
+```bash
+kubectl top pods -n dev
+kubectl describe pod <pod-name> -n dev | grep -A3 "Limits"
+```
+
+### Step 7 — Exec into pod if it stays up briefly
+```bash
+kubectl exec -it <pod-name> -n dev -- /bin/sh
+```
+Manually check env vars, file permissions, and connectivity to databases.
+
+---
+
+## Real AzureShop CrashLoopBackOff Cases — From the Actual Deployment
+
+### Case 1 — Issue #1: exec format error (All 8 pods crashed)
+
+**Symptom:** All 8 pods went into CrashLoopBackOff immediately after first deployment.
+
+**`kubectl logs --previous` showed:**
+```
+exec /usr/local/bin/node: exec format error
+```
+
+**Root cause:** Images were built on an Apple Silicon Mac (ARM64). AKS nodes run AMD64 (Intel/AMD). Binary format mismatch — the OS rejected every container.
+
+**Fix:**
+```bash
+docker buildx build --platform linux/amd64 \
+  -t acrazureshopdev.azurecr.io/user-service:v1.0.0 --push services/user-service/
+```
+Rebuilt all 8 images with `--platform linux/amd64`. All pods came up immediately.
+
+**Lesson:** Always build with `--platform linux/amd64` when deploying to AKS from an Apple Silicon Mac.
+
+---
+
+### Case 2 — Issue #7: api-gateway CrashLoopBackOff (nginx chown)
+
+**Symptom:** api-gateway crashed every time. Exit code 1. Died after 1 second.
+
+**`kubectl logs --previous` showed:**
+```
+nginx: [emerg] chown("/var/cache/nginx/client_temp", 101) failed (1: Operation not permitted)
+```
+
+**Root cause:** Our Helm security context drops ALL Linux capabilities (`capabilities: drop: [ALL]`). Standard `nginx:alpine` image needs the `CHOWN` capability to set directory ownership during startup.
+
+**Fix:** Switched Dockerfile base image:
+```dockerfile
+# Before
+FROM nginx:1.27-alpine
+
+# After
+FROM nginxinc/nginx-unprivileged:1.27-alpine
+```
+`nginx-unprivileged` is pre-configured to run with zero capabilities and no root access.
+
+**Lesson:** In hardened Kubernetes environments (`drop: ALL`, `runAsNonRoot`), always use images designed for non-root operation. For nginx, always use `nginx-unprivileged`.
+
+---
+
+### Case 3 — Issue #9: api-gateway still crashing after Case 2 fix
+
+**Symptom:** After fixing Case 2, api-gateway STILL crashed with exit code 1.
+
+**`kubectl logs --previous` showed:**
+```
+open() "/run/nginx.pid" failed (13: Permission denied)
+```
+
+**Root cause:** Our custom `nginx.conf` replaced the entire default config, including the `pid` directive. nginx fell back to the system default `/run/nginx.pid` — a non-root user cannot write to `/run/`.
+
+**Fix:** Added to `nginx.conf`:
+```nginx
+pid /tmp/nginx.pid;
+
+http {
+  client_body_temp_path /tmp/client_temp;
+  proxy_temp_path       /tmp/proxy_temp;
+}
+```
+Pushed as image `v1.0.2`.
+
+**Lesson:** One CrashLoopBackOff can hide another. Fix one crash, another appears. Keep reading `--previous` logs after each fix. When using `nginx-unprivileged` with a custom config, always redirect pid and temp paths to `/tmp`.
+
+---
+
+### Case 4 — Issue #8: All secret-mounted services crashed after AKS recreation
+
+**Symptom:** All 5 services that mount Key Vault secrets went into CrashLoopBackOff after Terraform recreated the AKS cluster.
+
+**`kubectl describe pod` Events showed:**
+```
+ManagedIdentityCredential authentication failed.
+The requested identity isn't assigned to this resource.
+```
+
+**Root cause:** AKS assigns a NEW managed identity every time it is recreated. All `SecretProviderClass` files had the OLD Client ID hardcoded. The CSI Driver couldn't authenticate to Key Vault → secrets couldn't mount → pods crashed.
+
+**Fix:**
+```bash
+# Get the new Client ID
+az aks show --name aks-azureshop-dev \
+  --query "addonProfiles.azureKeyvaultSecretsProvider.identity.clientId" -o tsv
+
+# Update SecretProviderClass files with new Client ID, then re-apply
+kubectl apply -f k8s/secret-provider-classes/
+kubectl rollout restart deployment/cart-service deployment/user-service \
+  deployment/order-service deployment/payment-service deployment/product-service -n dev
+```
+
+**Lesson:** Never hardcode AKS addon managed identity Client IDs. Every AKS recreation changes them. On any re-provisioning, always fetch the new Client ID before deploying.
+
+---
+
+### Case 5 — Issue #10: Frontend pod never became Ready (probe 404)
+
+**Symptom:** Frontend pod showed `0/1 Ready` and kept restarting. Exit code 1.
+
+**`kubectl describe pod` Events showed:**
+```
+Startup probe failed: HTTP probe failed with statuscode: 404
+```
+
+**Root cause:** Helm chart had `probes.path: /health`. Next.js has no `/health` route — every health check returned 404. Kubernetes killed the pod after consecutive probe failures.
+
+**Fix:**
+- Added `/api/health` route to Next.js pages
+- Updated Helm chart probe path to `/api/health`
+- Pushed new image as `v1.0.1` (new tag forces fresh pull — same tag would use cached broken image)
+
+**Lesson:** Health probe path must match an actual route the app serves. Always bump the image tag when pushing a fix — `pullPolicy: IfNotPresent` means Kubernetes silently uses the cached broken image if the tag hasn't changed.
+
+---
+
+## The Warn-and-Continue Pattern — How We Prevented More Crashes
+
+After fixing all above issues, we added a **warn-and-continue** pattern to all 8 services. Instead of crashing when a dependency (database, Redis, Service Bus) is unavailable at startup, services log a warning and start anyway:
+
+```javascript
+// Before — crashes on startup if DB unreachable → CrashLoopBackOff
+const client = await connectToDatabase();
+
+// After — warn and continue
+try {
+  await connectToDatabase();
+} catch (err) {
+  console.warn('[WARN] DB unavailable at startup — will retry on first request');
+}
+```
+
+This prevents CrashLoopBackOff when services come up in parallel and databases are not yet ready.
+
+---
+
+## Common CrashLoopBackOff Causes — Quick Reference
+
+| Cause | How to Identify | Fix |
+|-------|----------------|-----|
+| Application startup error | `logs --previous` shows error | Fix the application code/config |
+| Missing env var / secret | `describe` shows volume mount failure | Fix SecretProviderClass or ConfigMap |
+| OOMKilled | Exit code 137, `kubectl top pods` | Increase memory limits |
+| Wrong image architecture | `logs --previous`: exec format error | Rebuild with `--platform linux/amd64` |
+| Wrong health probe path | `describe` events: probe 404 | Fix probe path to match actual route |
+| Permission denied (non-root) | `logs --previous`: permission denied | Use unprivileged image, fix paths |
+| Database unreachable | `logs --previous`: connection refused | Add warn-and-continue, fix network |
+
+---
+
+## Interview Answer — Say Exactly This
+
+> "When a pod goes into CrashLoopBackOff, my first step is `kubectl describe pod` to get the exit code and events. Then `kubectl logs --previous` to see logs from the actual crashed container. In AzureShop I dealt with this five times. First, all 8 pods crashed with exec format error — images were built on Apple Silicon for ARM64 but AKS runs AMD64 — fixed by rebuilding with `--platform linux/amd64`. Second, api-gateway crashed with chown permission denied because our security context drops all Linux capabilities but standard nginx needs CHOWN — fixed by switching to `nginx-unprivileged`. Third, it crashed again with PID file permission denied because our custom nginx.conf didn't set `pid /tmp/nginx.pid`. Fourth, all secret-mounted services crashed after AKS recreation because the CSI Driver got a new managed identity — fixed by fetching the new Client ID and updating SecretProviderClass files. Fifth, the frontend never became Ready because the health probe path didn't match a real route — fixed by adding `/api/health` to Next.js and bumping the image tag. To prevent future crashes from dependency unavailability, we added a warn-and-continue pattern to all 8 services."
