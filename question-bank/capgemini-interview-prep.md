@@ -2963,6 +2963,146 @@ Helm is the standard way to install complex third-party tools like NGINX Ingress
 
 ---
 
+### Q22.3. How does traffic come from the internet into AKS? Explain the complete traffic flow. After path-based routing, what is the next component? How does traffic flow in big clusters?
+
+**Answer:**
+
+---
+
+## Complete Traffic Flow — AzureShop (6 Steps)
+
+```
+Step 1: User types shop.azureshop.com in browser
+           ↓
+Step 2: DNS resolves to Application Gateway Public IP
+           ↓
+Step 3: Azure Application Gateway
+        - SSL termination (HTTPS → HTTP inside private VNet)
+        - WAF inspection (blocks SQL injection, XSS attacks)
+        - Routes to NGINX backend pool
+           ↓
+Step 4: NGINX Ingress Controller (External IP: 134.33.223.224)
+        - Reads the URL path
+        - /api/products → product-service
+        - /api/orders   → order-service
+        - /api/users    → user-service
+        - /             → frontend
+           ↓
+Step 5: Kubernetes ClusterIP Service + kube-proxy
+        - ClusterIP is a stable virtual IP for a group of pods
+        - kube-proxy load balances to actual pod IPs via iptables rules
+           ↓
+Step 6: Pod handles the request
+```
+
+**Full diagram:**
+```
+Internet
+  │
+  ▼
+Azure Application Gateway (public IP)
+  │  WAF, SSL termination, health checks
+  │
+  ▼
+NGINX Ingress Controller (134.33.223.224)
+  │  Path-based routing
+  │
+  ├── /api/products ──▶ product-service ClusterIP ──▶ Pod(s)
+  ├── /api/orders ────▶ order-service ClusterIP ────▶ Pod(s)
+  ├── /api/users ─────▶ user-service ClusterIP ─────▶ Pod(s)
+  └── / ─────────────▶ frontend ClusterIP ──────────▶ Pod(s)
+```
+
+---
+
+## After Path-Based Routing — What is the Next Component?
+
+After NGINX routes to the correct backend, the next component is the **Kubernetes ClusterIP Service**, handled by **kube-proxy**.
+
+```
+NGINX decides: /api/products → product-service (ClusterIP: 10.96.45.23:8000)
+      ↓
+kube-proxy (DaemonSet — runs on every node)
+maintains iptables rules:
+"10.96.45.23:8000 → pick one of: 10.244.1.5, 10.244.2.8, 10.244.3.2"
+      ↓
+Actual Pod IP receives the request
+```
+
+| Component | Role |
+|-----------|------|
+| **ClusterIP Service** | Stable virtual IP — never changes even when pods restart |
+| **kube-proxy** | DaemonSet on every node — maintains iptables rules mapping ClusterIP → Pod IPs |
+| **iptables** | Linux kernel rules that do the actual load balancing |
+
+**Why ClusterIP and not direct pod IP?**
+
+Pods are temporary. A pod dies and restarts with a completely different IP. ClusterIP is permanent — NGINX always sends to the same address, kube-proxy handles finding the current pod IPs behind it.
+
+---
+
+## In Big Clusters — How Traffic Flow Changes
+
+In AzureShop (3 nodes, 8 services) the above flow is sufficient. In large enterprise clusters (50+ nodes, 100+ services), additional layers are added:
+
+### Layer 1 — Global: Azure Front Door
+```
+Users in India  ──▶ Azure Front Door ──▶ AKS cluster in Southeast Asia
+Users in Europe ──▶ Azure Front Door ──▶ AKS cluster in West Europe
+Users in USA    ──▶ Azure Front Door ──▶ AKS cluster in East US
+```
+Azure Front Door routes each user to the nearest healthy AKS cluster. Also provides global WAF and DDoS protection at Microsoft's edge network — before traffic even reaches your Azure region.
+
+### Layer 2 — Multiple Ingress Controllers (one per team)
+In a big cluster with 20 teams, each team or namespace has its own Ingress Controller with its own public IP:
+```
+team-a.company.com → NGINX for Team A namespace
+team-b.company.com → NGINX for Team B namespace
+```
+One shared NGINX becomes a single point of failure and a team cannot control their own routing rules.
+
+### Layer 3 — Service Mesh for East-West Traffic
+In big clusters, **east-west traffic** (service-to-service inside the cluster) is managed by a service mesh like **Istio** or **Linkerd**:
+```
+order-service pod ──▶ Istio sidecar proxy ──▶ payment-service pod
+                       (mTLS, retries, circuit breaking, traffic metrics)
+```
+In AzureShop, service-to-service goes directly pod-to-pod via ClusterIP. In enterprise, Istio adds: mutual TLS between every service, automatic retries, circuit breakers, and per-request traffic metrics — without changing any application code.
+
+### Layer 4 — IPVS Instead of iptables
+At 10,000+ services, iptables becomes slow — it checks every rule one by one (O(n) lookup). Big clusters switch kube-proxy to **IPVS mode** which uses a hash table (O(1) constant-time lookup regardless of service count).
+
+### Big Cluster Full Flow:
+```
+User
+  → Azure Front Door (global routing, DDoS, edge WAF)
+  → Application Gateway (regional SSL, WAF)
+  → NGINX Ingress (namespace-level path routing)
+  → ClusterIP Service + kube-proxy (IPVS mode)
+  → Istio sidecar proxy (mTLS, retries)
+  → Pod
+```
+
+---
+
+## AzureShop vs Big Cluster — Side by Side
+
+| Component | AzureShop (3 nodes) | Big Cluster (50+ nodes) |
+|-----------|--------------------|-----------------------|
+| Global routing | Not needed | Azure Front Door |
+| Edge security | Application Gateway | Front Door WAF + App Gateway |
+| Ingress | One NGINX for all services | One NGINX per team/namespace |
+| Service-to-service | Direct ClusterIP | Istio service mesh (mTLS) |
+| kube-proxy mode | iptables | IPVS |
+
+---
+
+## Interview Answer — Say Exactly This
+
+> "In AzureShop, internet traffic first hits Azure Application Gateway which handles SSL termination and WAF inspection. It then forwards to the NGINX Ingress Controller at IP `134.33.223.224` which does path-based routing — `/api/products` goes to product-service, `/api/orders` goes to order-service, and `/` goes to frontend. After NGINX routes to a backend, it reaches the Kubernetes ClusterIP Service. kube-proxy — which runs as a DaemonSet on every node — maintains iptables rules that translate the ClusterIP virtual IP to the actual pod IPs and load balances between them. In large clusters this flow gets additional layers: Azure Front Door for global routing across multiple regions, one NGINX Ingress Controller per team namespace, a service mesh like Istio for encrypted east-west traffic between services, and IPVS mode for kube-proxy to handle thousands of services efficiently."
+
+---
+
 ### Q23. What is Azure Container Registry (ACR)? Why did you use Premium SKU?
 
 **Answer:**
