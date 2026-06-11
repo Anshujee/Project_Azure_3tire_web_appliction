@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal.
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern.
 
 ---
 
@@ -27,6 +27,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 18. [What is the Purpose of Every Folder and File Inside the k8s/ Directory?](#q18-what-is-the-purpose-of-every-folder-and-file-inside-the-k8s-directory)
 19. [What are Service Endpoints? (Azure VNet Service Endpoints vs Kubernetes Endpoints)](#q19-what-are-service-endpoints-azure-vnet-service-endpoints-vs-kubernetes-endpoints)
 20. [What is the Difference Between a Service Endpoint and a Service Principal?](#q20-what-is-the-difference-between-a-service-endpoint-and-a-service-principal)
+21. [What is a Kubernetes Controller? How are Default Controllers Different from Managed Kubernetes Controllers?](#q21-what-is-a-kubernetes-controller-how-are-default-controllers-different-from-managed-kubernetes-controllers)
 
 ---
 
@@ -2028,3 +2029,412 @@ AKS pod (user-service)
 2. **Can you have a Service Endpoint without a Service Principal?** — Yes. Service Endpoint controls network access. Service Principal controls identity. They are independent layers. AzureShop uses both — Service Endpoints for network security, Service Principals for Terraform and pipeline authentication.
 3. **Which layer would block an attacker who has stolen SQL credentials but is connecting from a home network?** — The Service Endpoint (network layer). The firewall rule only allows traffic from the AKS subnet. A home IP is not in that subnet — the connection is blocked before credentials are even checked.
 4. **Which layer would block an attacker who is inside the AKS subnet but does not have SQL credentials?** — The identity/authentication layer. The attacker's traffic reaches SQL (correct network), but SQL rejects the login because the credentials are wrong.
+
+---
+
+## Q21. What is a Kubernetes Controller? How are Default Controllers Different from Managed Kubernetes Controllers?
+
+### What is a Controller? — The Thermostat Analogy
+
+Think of a Kubernetes Controller exactly like a **thermostat** in your home.
+
+A thermostat has one simple job:
+- You set the temperature to **22°C** → this is the **desired state**.
+- The thermostat reads the room temperature → this is the **actual state**.
+- If room is 18°C → it turns the heater ON.
+- If room is 25°C → it turns the heater OFF.
+- It keeps doing this check **forever, in a loop**, 24/7.
+
+A Kubernetes Controller works **exactly the same way**:
+- You tell Kubernetes "I want 2 replicas of user-service running" → **desired state**.
+- The controller checks "how many are actually running right now?" → **actual state**.
+- If actual ≠ desired → the controller **takes action to fix it**.
+- It keeps doing this loop **forever and automatically**.
+
+This is why Kubernetes is self-healing. If a pod crashes at 3am, a controller detects it and creates a new one — without anyone waking up.
+
+---
+
+### The Reconciliation Loop — The Heart of Every Controller
+
+Every single controller in Kubernetes follows the same pattern called the **Reconciliation Loop**:
+
+```
+┌────────────────────────────────────────────────────────┐
+│                  RECONCILIATION LOOP                    │
+│                                                         │
+│   1. OBSERVE  → Read the ACTUAL state from API Server  │
+│        ↓                                               │
+│   2. COMPARE  → Does actual == desired?                │
+│        ↓                                               │
+│   3. ACT      → If NO → take action to close the gap  │
+│        ↓                                               │
+│   4. REPEAT   → Go back to step 1 (runs forever)      │
+└────────────────────────────────────────────────────────┘
+```
+
+**Real AzureShop example — user-service at 3am:**
+```
+Desired state (in Deployment): replicas: 2
+Actual state (running pods):   1 pod (one crashed)
+
+Reconciliation Loop:
+  OBSERVE:  "Only 1 user-service pod is running"
+  COMPARE:  "1 ≠ 2 — there is a gap"
+  ACT:      "Create 1 new pod on a healthy node"
+  REPEAT:   "Now 2 pods running — gap closed, nothing to do"
+```
+
+This loop repeats every few seconds, automatically, forever.
+
+---
+
+### Where Do Controllers Live?
+
+All built-in Kubernetes controllers live inside one process called the **Controller Manager** (`kube-controller-manager`). This runs on the **Control Plane** (the brain of the cluster).
+
+Think of the Controller Manager as a **factory building** with many departments inside. Each department (controller) has one specific job and works independently.
+
+```
+kube-controller-manager (the factory building)
+│
+├── Deployment Controller      → manages Deployments
+├── ReplicaSet Controller      → manages pod replica counts (self-healing)
+├── Node Controller            → watches node health
+├── Job Controller             → manages one-off batch Jobs
+├── CronJob Controller         → manages scheduled Jobs
+├── Namespace Controller       → handles namespace lifecycle
+├── ServiceAccount Controller  → creates default service accounts
+├── EndpointSlice Controller   → keeps Service → pod IP mappings updated
+└── ... 30+ more controllers
+```
+
+Each controller watches only its own resource type. The Deployment Controller only cares about Deployments. The Node Controller only cares about Nodes. They never interfere with each other.
+
+---
+
+### The Most Important Built-in Controllers Explained
+
+#### 1. Deployment Controller
+**Job:** When you create or update a Deployment, it creates or manages a ReplicaSet.
+
+```
+You:   kubectl apply -f deployment.yaml  (image: user-service:v1, replicas: 2)
+  ↓
+Deployment Controller sees new Deployment → creates ReplicaSet v1 (replicas: 2)
+
+You:   kubectl set image deployment/user-service user-service=user-service:v2
+  ↓
+Deployment Controller creates ReplicaSet v2 (replicas: 0) and scales it UP
+Simultaneously scales ReplicaSet v1 (replicas: 2) DOWN
+This is the rolling update dance → zero downtime
+```
+
+---
+
+#### 2. ReplicaSet Controller
+**Job:** Makes sure exactly the right number of pods are always running. This is the **self-healing** controller.
+
+```
+Desired replicas: 2
+
+Actual: 2 pods → nothing to do
+Actual: 1 pod  → create 1 new pod immediately
+Actual: 3 pods → delete 1 pod (someone created an extra manually)
+Actual: 0 pods → create 2 pods immediately (maybe node crashed)
+```
+
+**Real AzureShop scenario:**
+```
+2:47am → Node running cart-service pod has hardware failure
+2:47am → ReplicaSet Controller: "Desired=2, Actual=1. Gap detected!"
+2:47am → Schedules new cart-service pod on a healthy node
+2:48am → New pod is Running and Ready
+2:48am → "Desired=2, Actual=2. Done."
+You wake up at 9am and everything is fine. You never knew it happened.
+```
+
+---
+
+#### 3. Node Controller
+**Job:** Watches the health of all nodes (the VMs). If a node goes silent, it marks it unhealthy and evicts its pods.
+
+```
+Timeline when a node suddenly crashes:
+  0 sec:  Node stops sending heartbeats to API Server
+ 40 sec:  Node Controller marks node status as "Unknown"
+  5 min:  Node Controller marks node as "NotReady"
+  5 min:  Node Controller adds NoExecute taint to the node
+          → all pods on that node begin evicting
+          → ReplicaSet Controller detects pod count drops
+          → creates replacement pods on healthy nodes
+```
+
+Why wait 5 minutes and not act immediately? Brief network glitches happen all the time. Waiting prevents unnecessary pod churn for a 30-second hiccup.
+
+---
+
+#### 4. EndpointSlice Controller
+**Job:** Maintains the real-time list of healthy pod IPs behind every Service.
+
+```
+user-service has 2 pods:
+  Pod A: 10.1.0.5 → passing readiness probe → IN the endpoint list ✅
+  Pod B: 10.1.0.6 → failing readiness probe → REMOVED from endpoint list ❌
+
+Traffic only reaches Pod A. Pod B receives zero requests until it recovers.
+When Pod B passes readiness again → added back to endpoint list automatically.
+```
+
+This is the mechanism that makes readiness probes actually affect traffic routing.
+
+---
+
+#### 5. Job Controller
+**Job:** Runs a pod until it completes successfully. Retries on failure. Does NOT restart after success.
+
+```
+Job: "run database migration script once and stop"
+  → starts pod
+  → pod crashes (DB not ready yet) → Job Controller retries
+  → pod runs successfully → exit code 0
+  → Job marked Complete, pod not restarted again ✅
+```
+
+---
+
+#### 6. CronJob Controller
+**Job:** Creates Job objects on a cron schedule.
+
+```
+CronJob: "run backup every day at 2am"
+  → At 2:00am: CronJob Controller creates a Job
+  → Job Controller runs the pod
+  → Pod completes successfully → Job done
+  → Next day at 2:00am: repeat
+```
+
+---
+
+### How Controllers Watch for Changes — The Watch Mechanism
+
+Controllers do NOT poll the API Server every second (that would be wasteful and slow). Instead they use a **Watch** mechanism — like push notifications instead of constantly refreshing.
+
+```
+Step 1 — Initial sync:
+  Controller → API Server: "Give me all Deployments right now" (LIST)
+  Controller builds its local cache of the current state
+
+Step 2 — Continuous watch:
+  Controller → API Server: "WATCH — stream me any changes"
+
+Step 3 — Events flow in:
+  API Server → Controller: "New Deployment created!" (event)
+  API Server → Controller: "A pod just died!" (event)
+  API Server → Controller: "Node went NotReady!" (event)
+
+Step 4 — Work queue:
+  Events go into a queue inside the controller
+  Controller processes events one by one and reconciles
+```
+
+This makes controllers react in milliseconds and use minimal resources. The cluster can have thousands of pods and the controllers handle it efficiently.
+
+---
+
+### Default (Self-Managed) Kubernetes vs Managed Kubernetes (AKS)
+
+This is one of the most important distinctions in real-world Kubernetes.
+
+#### Default Kubernetes — You Own Everything
+
+When you install Kubernetes yourself using `kubeadm` on bare-metal or raw VMs, you are responsible for the entire Control Plane:
+
+```
+YOU must manage:
+├── kube-controller-manager  → install it, keep it running, upgrade it
+├── kube-apiserver           → manage TLS certificates, upgrades, HA
+├── etcd                     → set up backups, multi-node HA
+├── kube-scheduler           → install and manage
+└── Worker node VMs          → provision VMs, join them to cluster
+
+If kube-controller-manager crashes at 3am:
+  → ALL reconciliation stops
+  → Crashed pods are NOT replaced
+  → Dead nodes are NOT detected
+  → Deployments NOT rolled out
+  → YOU get paged
+```
+
+This is fine for learning but very expensive in production — you need a dedicated platform/SRE team.
+
+---
+
+#### Managed Kubernetes (AKS) — Microsoft Owns the Control Plane
+
+When you use AKS, Microsoft runs and manages the entire Control Plane for you:
+
+```
+Microsoft manages (you never touch these):
+├── kube-controller-manager  → Microsoft runs it in HA, upgrades it
+├── kube-apiserver           → Microsoft manages certs, HA, upgrades
+├── etcd                     → auto-backed up by Azure
+├── kube-scheduler           → Microsoft manages it
+└── Cloud Controller Manager → Microsoft's extra controller (see below)
+
+YOU manage:
+└── Worker Node Pools → you choose VM size, count, autoscaling config
+
+If kube-controller-manager crashes:
+  → Microsoft's SRE team gets paged, not you
+  → It runs in HA mode — a standby instance takes over in seconds
+```
+
+In AKS the Control Plane is **completely free** — you only pay for the worker node VMs.
+
+---
+
+### The Extra Controller in AKS — Cloud Controller Manager
+
+This is the biggest difference between default Kubernetes and managed Kubernetes. AKS includes an extra controller called the **Cloud Controller Manager** that knows how to talk to the Azure API.
+
+It has three sub-controllers:
+
+```
+Cloud Controller Manager
+│
+├── Node Controller (cloud version)
+│     → When an Azure VM is deleted, automatically removes
+│       the corresponding Node from the cluster
+│
+├── Route Controller
+│     → Programs routes in the Azure VNet so pod IPs (Azure CNI)
+│       are reachable across nodes without NAT
+│
+└── Service Controller ← THE MOST IMPORTANT
+      → Watches for Services of type: LoadBalancer
+      → Calls the Azure API to provision a real Azure Load Balancer
+      → Gets a Public IP assigned
+      → Configures health probes automatically
+      → Writes the IP back to the Service object
+```
+
+**Real AzureShop example — how NGINX Ingress got its public IP:**
+```
+You ran: helm install ingress-nginx (Service type: LoadBalancer)
+  ↓
+Service Controller (Cloud Controller Manager) sees it
+  ↓
+Calls Azure API: "Provision a Load Balancer in rg-azureshop-dev"
+  ↓
+Azure creates Load Balancer + assigns Public IP: 134.33.223.224
+  ↓
+Service Controller updates the Service:
+  status.loadBalancer.ingress[0].ip = "134.33.223.224"
+  ↓
+kubectl get svc → shows EXTERNAL-IP: 134.33.223.224 ✅
+```
+
+Without the Cloud Controller Manager, `type: LoadBalancer` would hang as `<pending>` forever. Kubernetes would have no idea how to talk to Azure and provision a Load Balancer.
+
+---
+
+### Side-by-Side Comparison: Default vs Managed Kubernetes
+
+| | Default K8s (self-managed) | Managed K8s (AKS) |
+|---|---|---|
+| **Who runs controllers** | You | Microsoft (Control Plane SLA) |
+| **Control Plane cost** | You pay for extra VMs | Free |
+| **Controller crash at 3am** | You get paged | Microsoft SRE team handles it |
+| **etcd backup** | You set it up manually | Automatic |
+| **Control Plane HA** | You configure multi-master | Built-in, automatic |
+| **Cluster upgrades** | Manual, complex | `az aks upgrade` — one command |
+| **Cloud Controller Manager** | Not included | Included — talks to Azure API |
+| **LoadBalancer provisioning** | You manually create the LB | Automatic via Cloud Controller |
+| **Node removal when VM deleted** | Manual cleanup | Automatic via Cloud Controller |
+| **Who manages TLS certs** | You (kubeadm, cert rotation) | Microsoft |
+
+---
+
+### Custom Controllers — The Operator Pattern
+
+Kubernetes lets you write your own controllers for your own custom resources. This is called the **Operator Pattern**. An Operator is a custom controller that extends Kubernetes to manage complex applications automatically.
+
+**Real AzureShop example — Prometheus Operator:**
+
+When you installed `kube-prometheus-stack`, it installed a custom controller called the **Prometheus Operator**. It watches for a custom resource called `PrometheusRule`.
+
+When you applied `azureshop-alerts.yaml`:
+```
+You: kubectl apply -f k8s/alert-rules/azureshop-alerts.yaml
+     (kind: PrometheusRule — a custom resource, not built-in K8s)
+  ↓
+Prometheus Operator (custom controller) sees the new PrometheusRule
+  ↓
+Reads the alert definitions (HighErrorRate, PodCrashLoopBackOff, etc.)
+  ↓
+Injects them into Prometheus configuration automatically
+  ↓
+Prometheus starts evaluating the alerts — no restart needed ✅
+```
+
+Without the Prometheus Operator, you would have to manually edit Prometheus config files and restart Prometheus every time you added or changed an alert. The custom controller automates all of this — same reconciliation loop as built-in controllers, but for YOUR application's needs.
+
+**Other Operator/Custom Controller examples in AzureShop:**
+
+| Operator | What it watches | What it does automatically |
+|---|---|---|
+| **Prometheus Operator** | `PrometheusRule`, `ServiceMonitor` | Injects alert rules and scrape configs into Prometheus |
+| **Flux (GitOps)** | `GitRepository`, `HelmRelease` | Pulls from Git every 1 min, runs `helm upgrade` on changes |
+| **KEDA** | `ScaledObject` | Scales pods up/down based on queue length, event count |
+| **cert-manager** | `Certificate` | Requests and auto-renews TLS certs from Let's Encrypt |
+| **Secrets Store CSI Driver** | `SecretProviderClass` | Fetches secrets from Key Vault, creates K8s Secrets |
+
+All of these follow the same reconciliation loop pattern — watch → compare → act → repeat.
+
+---
+
+### How It All Connects in AzureShop
+
+```
+You run: helm upgrade --install user-service ./helm/charts/user-service --set image.tag=v1.0.2
+  ↓
+Helm sends the new Deployment object to the API Server
+  ↓
+API Server saves it to etcd → streams change event to all watchers
+  ↓
+Deployment Controller (built-in): "Deployment updated. Create new ReplicaSet v2."
+  ↓
+ReplicaSet Controller: "New ReplicaSet v2 needs 0→2 pods. Creating pods."
+  ↓
+Scheduler: "Pod needs a node. Node aks-user-vmss000001 has capacity. Assigned."
+  ↓
+kubelet on aks-user-vmss000001: "New pod assigned to me. Pull image from ACR."
+  ↓
+containerd: pulls user-service:v1.0.2 from acrazureshopdev.azurecr.io
+  ↓
+Pod starts → readiness probe passes
+  ↓
+EndpointSlice Controller: "New healthy pod. Add 10.1.0.9:3001 to user-service endpoints."
+  ↓
+Deployment Controller: "v2 pods healthy. Scale down v1 ReplicaSet."
+  ↓
+Old pods gracefully terminate (SIGTERM → 30s grace → gone)
+  ↓
+Rolling update complete. Zero downtime. ✅
+```
+
+Every step in this flow is driven by a different controller — all working together, all following the same reconciliation loop.
+
+---
+
+### Interview Prep
+
+1. **What is a Kubernetes controller?** — A control loop that continuously watches the cluster state (via the API Server), compares it to the desired state, and takes action to close any gap. Follows the observe → compare → act → repeat pattern. This is why Kubernetes is self-healing.
+2. **What is the reconciliation loop?** — The core pattern every controller follows: read actual state, compare to desired state, act to fix any difference, repeat forever. The same loop whether it's the built-in ReplicaSet Controller or a custom Prometheus Operator.
+3. **Where do built-in controllers run?** — Inside `kube-controller-manager`, which runs on the Control Plane. In AKS, Microsoft manages this — you never touch it.
+4. **What is the difference between default Kubernetes and AKS regarding controllers?** — In default (self-managed) Kubernetes, YOU run and maintain all Control Plane components including kube-controller-manager. In AKS, Microsoft manages the entire Control Plane. AKS also includes the Cloud Controller Manager — an extra controller that knows how to talk to the Azure API.
+5. **What does the Cloud Controller Manager do in AKS?** — It bridges Kubernetes and Azure. Its most important sub-controller is the Service Controller — when you create a `type: LoadBalancer` Service, it automatically calls the Azure API to provision an Azure Load Balancer and assign a Public IP. In AzureShop, this is how NGINX Ingress got its external IP `134.33.223.224`.
+6. **What is the Operator Pattern?** — Writing a custom controller for a custom resource. The controller watches for that resource and manages a complex application automatically using the same reconciliation loop as built-in controllers. In AzureShop, the Prometheus Operator watches `PrometheusRule` objects and injects alert rules into Prometheus automatically.
+7. **What happens if kube-controller-manager crashes in self-managed vs AKS?** — In self-managed Kubernetes, all reconciliation stops — crashed pods are not replaced, dead nodes not detected, rollouts stall — and you get paged. In AKS, the Control Plane runs in HA mode managed by Microsoft — a standby instance takes over in seconds and their SRE team handles it.
+8. **How does a controller watch for changes efficiently without polling every second?** — Using the Kubernetes Watch mechanism. The controller does an initial LIST to sync its cache, then opens a long-lived WATCH stream to the API Server. Changes are pushed to the controller as events in real time. Changes go into a work queue and are processed asynchronously. This is fast (millisecond reaction time) and resource-efficient.
