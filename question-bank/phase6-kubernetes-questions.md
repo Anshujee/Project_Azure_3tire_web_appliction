@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels).
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration).
 
 ---
 
@@ -31,6 +31,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 22. [What is a Kubernetes Service? Full Working, Types, and How AzureShop Uses It?](#q22-what-is-a-kubernetes-service-full-working-types-and-how-azureshop-uses-it)
 23. [What is the Role of kube-proxy in Kubernetes?](#q23-what-is-the-role-of-kube-proxy-in-kubernetes)
 24. [What are Labels and Selectors in Kubernetes? How are They Different and How Does AzureShop Use Them?](#q24-what-are-labels-and-selectors-in-kubernetes-how-are-they-different-and-how-does-azureshop-use-them)
+25. [What is Kubernetes RBAC? How Does it Work, What are Roles, RoleBindings, ClusterRoles, and ServiceAccounts?](#q25-what-is-kubernetes-rbac-how-does-it-work-what-are-roles-rolebindings-clusterroles-and-serviceaccounts)
 
 ---
 
@@ -3726,3 +3727,676 @@ Direction:
 7. **What is `matchLabels` vs `matchExpressions`?** — `matchLabels` is a simple equality check: label key must equal this value. `matchExpressions` supports operators: `In` (value must be one of), `NotIn` (value must not be one of), `Exists` (label must be present regardless of value), `DoesNotExist` (label must be absent). Both can be combined — all conditions must pass (logical AND). `matchLabels` is sufficient for most use cases; `matchExpressions` is used when you need more complex filtering like "apply this NetworkPolicy to all services except the cache tier."
 
 8. **How would you troubleshoot a Service that has no endpoints?** — Run `kubectl get endpoints <service-name> -n <namespace>`. If it shows `<none>`, the Service selector is not matching any pods. Then run `kubectl get pods -n <namespace> --show-labels` and compare the pod labels against the Service selector. Look for typos (hyphen vs underscore), missing labels, or wrong values. A mismatch here is the most common cause of "connection refused" errors in Kubernetes.
+
+---
+
+## Q25. What is Kubernetes RBAC? How Does it Work, What are Roles, RoleBindings, ClusterRoles, and ServiceAccounts?
+
+### The Core Problem RBAC Solves
+
+In a real Kubernetes cluster, many different things need to talk to the Kubernetes API server:
+
+- **Developers** run `kubectl get pods`, `kubectl apply`, `kubectl delete`
+- **CI/CD pipelines** deploy new versions of services
+- **Monitoring tools** like Prometheus read pod metrics
+- **The Key Vault CSI Driver** reads secrets from Azure Key Vault
+- **The HPA controller** reads CPU metrics and scales Deployments
+- **Your own application pods** — do they need to call the Kubernetes API at all?
+
+Without access control, everyone and everything could do everything — a developer could accidentally delete a production database, a compromised pod could read all secrets in the cluster, a CI pipeline could modify cluster-wide settings.
+
+**RBAC (Role-Based Access Control)** is how Kubernetes controls who is allowed to do what.
+
+Think of it like a building with different rooms. An employee (subject) has a keycard (Role) that gives them access to specific rooms (resources). Without the right keycard they cannot enter, regardless of how hard they try. RBAC is the keycard system for Kubernetes.
+
+---
+
+### The Three Questions RBAC Answers
+
+Every access request to the Kubernetes API is checked against three questions:
+
+```
+1. WHO are you?          → Subject (User, Group, or ServiceAccount)
+2. WHAT do you want to do? → Verb (get, list, create, delete, patch, watch...)
+3. ON WHAT?              → Resource (pods, secrets, deployments, services...)
+```
+
+If ALL three match a Rule that has been granted to you via a Role and a Binding, the request is allowed. Otherwise it is denied with `403 Forbidden`.
+
+---
+
+### The Four Key Objects in Kubernetes RBAC
+
+| Object | What it defines | Scope |
+|---|---|---|
+| **Role** | A set of permissions | One namespace only |
+| **ClusterRole** | A set of permissions | Entire cluster (all namespaces) OR non-namespaced resources |
+| **RoleBinding** | Grants a Role or ClusterRole to a Subject | One namespace |
+| **ClusterRoleBinding** | Grants a ClusterRole to a Subject | Entire cluster |
+
+These four objects work in pairs:
+- **Role + RoleBinding** → "You can do X in this namespace"
+- **ClusterRole + ClusterRoleBinding** → "You can do X everywhere in the cluster"
+- **ClusterRole + RoleBinding** → "You can do X, but only in this specific namespace" (reuse the ClusterRole, limit by RoleBinding)
+
+---
+
+### Term 1: Subject — WHO is making the request?
+
+A subject is the identity making an API request. There are three types:
+
+#### 1. User
+A real human. In raw Kubernetes this is a certificate-based identity. In AKS with Azure AD integration (`azure_rbac_enabled = true`), this is an **Azure AD user** — your Microsoft email address is your Kubernetes identity.
+
+```
+Developer: amar@company.com
+→ kubectl get pods  
+→ Kubernetes asks Azure AD: "Is this token valid for this user?"
+→ Azure AD says yes
+→ Kubernetes checks RBAC: "Does this user have permission to get pods?"
+```
+
+#### 2. Group
+A collection of users. Instead of granting permissions to each individual, you grant to a group and add people to the group. In AKS with Azure AD, these are **Azure AD security groups**.
+
+```
+Group: aks-developers (Azure AD group)
+→ All members of this group get the same Kubernetes permissions
+→ Add/remove people from the Azure AD group = add/remove cluster access
+```
+
+#### 3. ServiceAccount
+An identity for a **machine** or **process** (not a human). Pods use ServiceAccounts to authenticate to the Kubernetes API. This is the most important subject type for understanding how AzureShop works.
+
+```
+Pod: user-service-7d4f9b-xk2p9
+→ Uses ServiceAccount: user-service
+→ ServiceAccount has a token (JWT)
+→ Any API call the pod makes is identified as "user-service ServiceAccount"
+```
+
+---
+
+### Term 2: Verb — WHAT do you want to do?
+
+Verbs are the actions. The full list:
+
+| Verb | What it does | HTTP method equivalent |
+|---|---|---|
+| `get` | Read one specific object | GET /resource/name |
+| `list` | Read all objects of a type | GET /resource |
+| `watch` | Stream changes to objects | GET with `?watch=true` |
+| `create` | Create a new object | POST |
+| `update` | Replace an entire object | PUT |
+| `patch` | Modify part of an object | PATCH |
+| `delete` | Delete one object | DELETE |
+| `deletecollection` | Delete all objects of a type | DELETE on collection |
+
+Common patterns:
+- **Read only:** `get`, `list`, `watch`
+- **Read + write:** `get`, `list`, `watch`, `create`, `update`, `patch`, `delete`
+- **Prometheus needs:** `get`, `list`, `watch` on pods, endpoints, nodes
+
+---
+
+### Term 3: Resource — ON WHAT?
+
+Resources are the Kubernetes object types: `pods`, `services`, `deployments`, `secrets`, `configmaps`, `namespaces`, `nodes`, `persistentvolumes`, etc.
+
+Resources have **subresources** too:
+- `pods/log` — read pod logs
+- `pods/exec` — exec into a pod
+- `pods/status` — read/update pod status
+- `deployments/scale` — scale a deployment
+
+You can grant access to a resource without granting access to its subresources, or vice versa.
+
+Resources can also be **non-namespaced** (cluster-scoped):
+- `nodes` — the actual worker VMs
+- `namespaces` — the namespaces themselves
+- `persistentvolumes` — cluster-wide storage
+- `clusterroles`, `clusterrolebindings` — RBAC objects themselves
+
+Non-namespaced resources can only be controlled with ClusterRoles and ClusterRoleBindings, not namespace-scoped Roles.
+
+---
+
+### Term 4: Role — Defining Permissions
+
+A Role is a collection of **rules**. Each rule says: "for these resources, these verbs are allowed."
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: pod-reader                  # name of this Role
+  namespace: dev                    # only applies in the "dev" namespace
+rules:
+  - apiGroups: [""]                 # "" means core API group (pods, services, secrets)
+    resources: ["pods"]             # which resources
+    verbs: ["get", "list", "watch"] # what they can do
+
+  - apiGroups: ["apps"]             # "apps" group (deployments, replicasets)
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+```
+
+Key points:
+- A Role is **purely a definition** — it grants nothing on its own
+- You need a **RoleBinding** to actually grant the Role to someone
+- `apiGroups: [""]` is the core API group — pods, services, configmaps, secrets, etc.
+- `apiGroups: ["apps"]` covers Deployments, ReplicaSets, StatefulSets, DaemonSets
+- `apiGroups: ["batch"]` covers Jobs and CronJobs
+- `apiGroups: ["autoscaling"]` covers HPAs
+
+---
+
+### Term 5: ClusterRole — Cluster-Wide Permissions
+
+A ClusterRole is exactly like a Role but has no namespace — it applies across the entire cluster. Use ClusterRole when:
+- You need access to **non-namespaced resources** (nodes, namespaces, PersistentVolumes)
+- You want to define a permission set once and reuse it in multiple namespaces
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: node-reader                 # no namespace field — cluster-scoped
+rules:
+  - apiGroups: [""]
+    resources: ["nodes"]            # nodes are cluster-scoped, can't use Role for this
+    verbs: ["get", "list", "watch"]
+
+  - apiGroups: [""]
+    resources: ["pods"]             # can also include namespaced resources
+    verbs: ["get", "list", "watch"]
+```
+
+Kubernetes ships with several **built-in ClusterRoles** that you can use directly:
+
+| Built-in ClusterRole | What it grants |
+|---|---|
+| `cluster-admin` | Full access to everything — superuser |
+| `admin` | Full access within a namespace (used in RoleBindings) |
+| `edit` | Read + write most resources in a namespace |
+| `view` | Read-only access to most resources in a namespace |
+
+In AzureShop, `azure_rbac_enabled = true` means the Azure role `Azure Kubernetes Service RBAC Cluster Admin` maps to the Kubernetes `cluster-admin` ClusterRole. This is granted in Terraform:
+
+```hcl
+# infra/main.tf — line 143
+resource "azurerm_role_assignment" "aks_cluster_admin" {
+  principal_id         = var.aks_admin_object_id
+  role_definition_name = "Azure Kubernetes Service RBAC Cluster Admin"
+  scope                = module.aks.aks_cluster_id
+}
+```
+
+---
+
+### Term 6: RoleBinding — Granting a Role to a Subject
+
+A RoleBinding connects a Subject to a Role (or ClusterRole) within a specific namespace. It is the bridge between "what is allowed" and "who is allowed to do it."
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: read-pods-binding
+  namespace: dev                    # this binding is only effective in "dev" namespace
+subjects:                           # WHO gets the permissions
+  - kind: ServiceAccount
+    name: monitoring-agent          # the ServiceAccount name
+    namespace: monitoring           # the namespace where the ServiceAccount lives
+roleRef:                            # WHAT permissions are granted
+  kind: Role                        # can be "Role" or "ClusterRole"
+  name: pod-reader                  # the Role/ClusterRole name
+  apiGroup: rbac.authorization.k8s.io
+```
+
+The RoleBinding says: "The `monitoring-agent` ServiceAccount (in namespace `monitoring`) is allowed to do everything the `pod-reader` Role permits, but only within the `dev` namespace."
+
+**You can also bind a ClusterRole with a RoleBinding** — this is a common pattern:
+```yaml
+roleRef:
+  kind: ClusterRole    # reusing the ClusterRole definition
+  name: pod-reader
+```
+This grants the ClusterRole's permissions, but **limited to the namespace of the RoleBinding**. The ClusterRole is just a reusable template.
+
+---
+
+### Term 7: ClusterRoleBinding — Granting Cluster-Wide Access
+
+A ClusterRoleBinding grants a ClusterRole to a Subject across the entire cluster — no namespace restriction.
+
+```yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-cluster-reader   # no namespace — cluster-scoped
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: cluster-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+This says: "The `prometheus` ServiceAccount (in the `monitoring` namespace) can read all pods, services, and nodes across every namespace in the cluster."
+
+Prometheus needs this because it scrapes metrics from pods in ALL namespaces — it cannot be limited to a single namespace.
+
+---
+
+### Term 8: ServiceAccount — Machine Identity in Kubernetes
+
+A ServiceAccount is the Kubernetes identity for a **pod** (or any automated process running in the cluster). Humans use User identities; pods use ServiceAccounts.
+
+When a pod is created, Kubernetes:
+1. Assigns it a ServiceAccount (default is `default` if not specified)
+2. Mounts a JWT token for that ServiceAccount into the pod at `/var/run/secrets/kubernetes.io/serviceaccount/token`
+3. The pod presents this token when calling the Kubernetes API
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: user-service
+  namespace: dev
+automountServiceAccountToken: false   # disable auto-mount (AzureShop security practice)
+```
+
+**Default ServiceAccount:** Every namespace has a `default` ServiceAccount. If you don't specify a ServiceAccount in your pod spec, the pod gets the `default` one. In modern Kubernetes the default ServiceAccount has no permissions — it is safe but also useless for any API calls.
+
+**`automountServiceAccountToken: false`:** Disables the automatic mounting of the JWT token. If your pod never needs to call the Kubernetes API, there is no reason to have the token available in the container's filesystem — removing it reduces the attack surface.
+
+---
+
+### How RBAC Works — The Full Flow
+
+Let's trace what happens when Prometheus tries to list pods:
+
+```
+1. Prometheus pod makes HTTP request:
+   GET https://kubernetes.default.svc/api/v1/pods
+   Authorization: Bearer eyJhbGciOiJSUzI1NiIs...   ← ServiceAccount JWT token
+
+2. API Server receives the request.
+   It passes through THREE checks in order:
+
+   ┌──────────────────────────────────────────────────────────────────┐
+   │  AUTHENTICATION                                                  │
+   │  "Who are you?"                                                  │
+   │  API Server validates the JWT token against the cluster CA.      │
+   │  Result: "This is ServiceAccount prometheus in namespace monitoring" │
+   └──────────────────────────────────────────────────────────────────┘
+                               ↓
+   ┌──────────────────────────────────────────────────────────────────┐
+   │  AUTHORIZATION (RBAC)                                            │
+   │  "Are you allowed to do this?"                                   │
+   │  API Server checks: does prometheus SA have a RoleBinding or     │
+   │  ClusterRoleBinding that grants verb=list on resource=pods?      │
+   │  Result: Yes → ClusterRoleBinding prometheus-cluster-reader      │
+   │          grants ClusterRole that includes list/pods              │
+   └──────────────────────────────────────────────────────────────────┘
+                               ↓
+   ┌──────────────────────────────────────────────────────────────────┐
+   │  ADMISSION CONTROL                                               │
+   │  "Should this operation be allowed through policy?"              │
+   │  (Azure Policy, PodSecurity, ValidatingWebhookConfigurations)    │
+   │  Result: Pass                                                    │
+   └──────────────────────────────────────────────────────────────────┘
+                               ↓
+3. Response: 200 OK — list of all pods
+```
+
+If the RBAC check fails (no matching RoleBinding/ClusterRoleBinding), step 2 returns:
+```
+403 Forbidden: User "system:serviceaccount:monitoring:prometheus" cannot list resource "pods"
+```
+
+---
+
+### Role vs ClusterRole vs RoleBinding vs ClusterRoleBinding — Decision Guide
+
+```
+Q: Do you need to access non-namespaced resources (nodes, namespaces, PVs)?
+   → YES: Must use ClusterRole + ClusterRoleBinding
+
+Q: Do you need to access resources in ALL namespaces?
+   → YES: ClusterRole + ClusterRoleBinding
+   → NO, just one namespace: Role + RoleBinding  (or ClusterRole + RoleBinding to reuse)
+
+Q: Do you want to define permissions once but use in multiple namespaces?
+   → ClusterRole (definition) + RoleBinding in each namespace (scoped grant)
+
+Q: What does `cluster-admin` do?
+   → Full access to EVERYTHING — only grant to trusted humans and trusted automation
+```
+
+Diagram:
+
+```
+Role ──────────────── RoleBinding ──── Subject
+  (permissions)         (in ns=dev)      (user/SA/group)
+  namespace-scoped    namespace-scoped
+
+ClusterRole ─┬───────── ClusterRoleBinding ── Subject
+  (permissions)│          (cluster-wide)
+  cluster-wide │
+               └───────── RoleBinding ──────── Subject
+                           (in ns=dev)
+                           ← limits scope to one namespace
+```
+
+---
+
+### Azure RBAC vs Kubernetes RBAC — Two Separate Systems
+
+In AzureShop, `azure_rbac_enabled = true` means there are TWO layers of RBAC:
+
+| | Azure RBAC | Kubernetes RBAC |
+|---|---|---|
+| **Controls** | Who can run `kubectl` commands | What pods/serviceaccounts can do inside the cluster |
+| **Subjects** | Azure AD users and groups | K8s Users, Groups, ServiceAccounts |
+| **Defined in** | Azure portal / Terraform azurerm_role_assignment | K8s Role, ClusterRole, RoleBinding objects |
+| **Examples** | AKS RBAC Cluster Admin, AKS RBAC Reader | pod-reader Role, cluster-admin ClusterRole |
+| **Checked by** | Azure AD (before reaching K8s API server) | K8s API Server authorization layer |
+
+The flow when a developer runs `kubectl get pods -n dev`:
+
+```
+Developer laptop
+  → az login (Azure AD authentication)
+  → kubectl uses az CLI token
+  → API Server calls Azure AD: "Is this token valid?"
+  → Azure AD confirms: "Yes, this is amar@company.com"
+  → Azure AD also returns: "This user has Azure role AKS RBAC Cluster Admin"
+  → API Server maps that Azure role → K8s cluster-admin ClusterRole
+  → Access granted
+```
+
+When Azure RBAC is enabled, the Azure role assignments control access instead of local K8s ClusterRoleBindings for human users. ServiceAccounts inside the cluster still use standard K8s RBAC (Roles, RoleBindings) — Azure RBAC only covers external access via kubectl.
+
+---
+
+### ServiceAccount in AzureShop — Exactly How It's Used
+
+Every one of the 8 AzureShop services has its own ServiceAccount. Let's trace user-service from definition to running pod.
+
+#### Step 1: ServiceAccount is created by Helm
+
+File: `helm/charts/user-service/templates/serviceaccount.yaml`
+
+```yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: user-service            # matches the service name
+  namespace: dev
+  labels:
+    app.kubernetes.io/name: user-service
+    app.kubernetes.io/managed-by: Helm
+automountServiceAccountToken: false    # ← security: no API token in pod filesystem
+```
+
+`automountServiceAccountToken: false` is set because user-service pods never need to call the Kubernetes API. They call Azure SQL, Azure Application Insights, other microservices — but not the K8s API server. There is no reason to have the credential sitting in the container.
+
+#### Step 2: Deployment references the ServiceAccount
+
+File: `helm/charts/user-service/templates/deployment.yaml`
+
+```yaml
+spec:
+  template:
+    spec:
+      serviceAccountName: user-service    # ← pod runs AS this ServiceAccount
+```
+
+Without `serviceAccountName`, the pod would use the `default` ServiceAccount. AzureShop explicitly sets it to `user-service` because:
+1. It follows least-privilege: each service has its own identity
+2. Workload Identity (Phase 6.7) requires binding to a specific named ServiceAccount
+3. It makes audit logs meaningful — "user-service did X" instead of "default did X"
+
+#### Step 3: Kubernetes creates the pod with the ServiceAccount identity
+
+At runtime, the pod's process identity IS the ServiceAccount. Any action the pod takes against the Kubernetes API is as `system:serviceaccount:dev:user-service`.
+
+Currently user-service has no RoleBindings — it cannot do anything in the Kubernetes API. This is correct. user-service only needs to talk to the database.
+
+---
+
+### Workload Identity — ServiceAccount Meets Azure RBAC
+
+The notification-service goes further. It uses **Workload Identity** to authenticate to Azure services using its Kubernetes ServiceAccount. This is where K8s ServiceAccount + Azure RBAC combine.
+
+File: `helm/charts/notification-service/values.yaml`
+
+```yaml
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: "2e5e41cb-dd6c-46a5-8420-165c463fe974"
+
+workloadIdentity:
+  enabled: true
+```
+
+The annotation links the Kubernetes ServiceAccount to an Azure Managed Identity. Here is the full chain:
+
+```
+Step 1 — Terraform creates a Managed Identity
+  resource "azurerm_user_assigned_identity" "notification_service"
+  → Managed Identity: id-notification-service-dev
+  → Client ID: 2e5e41cb-dd6c-46a5-8420-165c463fe974
+
+Step 2 — Terraform creates a Federated Identity Credential
+  resource "azurerm_federated_identity_credential" "notification_service"
+  → Links K8s ServiceAccount "notification-service" in namespace "dev"
+    to the Managed Identity above
+  → AKS OIDC issuer signs SA tokens; Azure AD trusts this issuer
+
+Step 3 — Terraform grants the Managed Identity access to Key Vault
+  resource "azurerm_role_assignment" "notification_service_kv_secrets_user"
+  → Role: Key Vault Secrets User
+  → Scope: Key Vault kv-azureshop-6a6c-dev
+
+Step 4 — Helm deploys the pod
+  → ServiceAccount has annotation: azure.workload.identity/client-id = 2e5e41cb...
+  → Workload Identity webhook injects:
+       env var AZURE_CLIENT_ID = 2e5e41cb...
+       volume: projected ServiceAccount token (short-lived, Azure-audience)
+
+Step 5 — Pod calls Azure Key Vault SDK
+  → SDK reads AZURE_CLIENT_ID and the projected token
+  → Exchanges token for a short-lived Azure AD access token
+  → Uses that to read secrets from Key Vault
+  → No credentials stored anywhere
+```
+
+This is the most secure pattern — the pod's Kubernetes identity (ServiceAccount) directly maps to an Azure identity (Managed Identity), granting access to Azure resources without any passwords or keys.
+
+---
+
+### Does AzureShop Have Kubernetes Role/RoleBinding Objects?
+
+Currently AzureShop does **not** define explicit `Role` or `RoleBinding` objects. Here is why, and here is what it would look like if it did:
+
+**Why there are none today:**
+- None of the 8 application services call the Kubernetes API — they talk to databases, queues, and other services, not to the K8s API server
+- `automountServiceAccountToken: false` on every ServiceAccount means no K8s API credential is even available to the pods
+- The CSI Driver (Key Vault) uses the **node's managed identity**, not the pod's ServiceAccount token — it runs as a daemonset with its own permissions granted via Azure RBAC (Terraform)
+- Human access is controlled entirely by Azure RBAC (`azure_rbac_enabled = true`) — no local ClusterRoleBinding objects needed
+
+**If Prometheus were deployed, it would need:**
+
+```yaml
+# ClusterRole — can read pods/services/nodes cluster-wide
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus-reader
+rules:
+  - apiGroups: [""]
+    resources: ["nodes", "pods", "services", "endpoints"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+---
+# ClusterRoleBinding — grant the ClusterRole to the prometheus ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus-reader-binding
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: monitoring
+roleRef:
+  kind: ClusterRole
+  name: prometheus-reader
+  apiGroup: rbac.authorization.k8s.io
+```
+
+**If a CI/CD pipeline ServiceAccount needed to deploy:**
+
+```yaml
+# Role — can manage deployments in the dev namespace only
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: deployer
+  namespace: dev
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["services", "configmaps"]
+    verbs: ["get", "list", "create", "update", "patch"]
+---
+# RoleBinding — grant it to the CI pipeline's ServiceAccount
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: ci-deployer-binding
+  namespace: dev
+subjects:
+  - kind: ServiceAccount
+    name: azure-pipelines
+    namespace: dev
+roleRef:
+  kind: Role
+  name: deployer
+  apiGroup: rbac.authorization.k8s.io
+```
+
+---
+
+### RBAC Principle: Least Privilege
+
+RBAC only works well when you apply **least privilege** — grant each subject the minimum permissions it needs, nothing more.
+
+In AzureShop:
+
+| Subject | What it needs | What it has |
+|---|---|---|
+| Developer | Run `kubectl` on dev cluster | Azure role: AKS RBAC Cluster Admin |
+| user-service pod | Talk to Azure SQL | ServiceAccount (no K8s permissions), Azure RBAC via CSI node identity |
+| notification-service pod | Read Key Vault secrets | ServiceAccount + Workload Identity → Managed Identity → Key Vault Secrets User role |
+| CSI Driver (node addon) | Read Key Vault for all pods | Azure RBAC: Key Vault Secrets User on Key Vault |
+| HPA controller | Read pod metrics, scale deployments | Built-in — managed by AKS control plane |
+| Flux GitOps operator | Create/update Helm releases | ClusterAdmin (Flux needs cluster-wide write access — installed with its own RBAC) |
+
+The core rule: **if a component doesn't need to call the K8s API, it should have `automountServiceAccountToken: false` and no RoleBinding.**
+
+---
+
+### Common RBAC Errors and What They Mean
+
+**Error 1: 403 Forbidden**
+```
+Error from server (Forbidden): pods is forbidden: User 
+"system:serviceaccount:dev:user-service" cannot list resource "pods" 
+in API group "" in the namespace "dev"
+```
+**Means:** The ServiceAccount has no RoleBinding granting `list` on `pods`. Either you forgot to create the RoleBinding, or the RoleBinding is in the wrong namespace.
+
+**Error 2: kubectl access denied after `az aks get-credentials`**
+```
+Error from server (Forbidden): pods is forbidden: User 
+"amar@company.com" cannot list resource "pods"
+```
+**Means:** The Azure AD user has credentials but no Azure role assignment (like `AKS RBAC Reader` or `AKS RBAC Cluster Admin`) on the AKS cluster. Fix: add the Azure role assignment in the Azure portal or Terraform.
+
+**Error 3: "system:anonymous" in error message**
+```
+User "system:anonymous" cannot get path "/"
+```
+**Means:** The request reached the API server without a valid token — unauthenticated. Check that `kubeconfig` is correctly set up and that `az login` or `kubelogin` succeeded.
+
+**Error 4: ServiceAccount can list pods in namespace X but not namespace Y**
+```
+User "system:serviceaccount:monitoring:prometheus" cannot list resource "pods" 
+in API group "" in the namespace "production"
+```
+**Means:** Prometheus has a `RoleBinding` in namespace `monitoring` but not in namespace `production`. Either add a RoleBinding in each namespace, or switch to a `ClusterRoleBinding` to give access everywhere.
+
+---
+
+### Quick Reference: The Full RBAC Picture
+
+```
+                        KUBERNETES RBAC
+                        ══════════════
+
+  WHO (Subject)          HOW (Binding)         WHAT (Role)
+  ─────────────          ─────────────         ──────────────────────
+
+  User                   RoleBinding           Role
+  amar@company.com  ───► (namespace: dev)  ───► rules:
+                                               - pods: get/list/watch
+                                               - deployments: get/list
+
+  Group                  RoleBinding           ClusterRole (reused)
+  aks-developers    ───► (namespace: dev)  ───► rules:
+                                               - pods: get/list/watch
+                                               - services: get/list
+
+  ServiceAccount         ClusterRoleBinding    ClusterRole
+  prometheus        ───► (cluster-wide)    ───► rules:
+  (monitoring ns)                              - nodes: get/list/watch
+                                               - pods: get/list/watch
+                                               (all namespaces)
+
+  ServiceAccount         (none — no K8s       (none)
+  user-service           API access needed)
+  (dev ns)
+        │
+        └──────────────► Azure RBAC via       Key Vault Secrets User
+                         Workload Identity     (on Azure Key Vault)
+                         + Managed Identity
+```
+
+---
+
+### Interview Prep
+
+1. **What is Kubernetes RBAC?** — RBAC (Role-Based Access Control) is the Kubernetes authorization system. Every request to the Kubernetes API is checked: WHO is making it (Subject), WHAT do they want to do (Verb), and ON WHAT (Resource). RBAC grants or denies that request based on Role and RoleBinding objects. Without RBAC, any pod or user could read all secrets, delete all deployments, and crash the cluster.
+
+2. **What is the difference between a Role and a ClusterRole?** — A Role defines permissions within a single namespace — a pod can read secrets in namespace `dev` only. A ClusterRole defines permissions cluster-wide — it can cover all namespaces and also non-namespaced resources like `nodes` and `namespaces` themselves, which Roles cannot access. You can also reuse a ClusterRole as a template by binding it with a namespace-scoped RoleBinding.
+
+3. **What is the difference between a RoleBinding and a ClusterRoleBinding?** — A RoleBinding grants a Role (or ClusterRole) to a Subject within ONE namespace only. A ClusterRoleBinding grants a ClusterRole to a Subject across ALL namespaces and all cluster-scoped resources. Prometheus uses a ClusterRoleBinding because it needs to read pods from every namespace. A CI pipeline uses a RoleBinding because it should only deploy to the `dev` namespace.
+
+4. **What is a ServiceAccount?** — A ServiceAccount is the Kubernetes identity for a pod. Every pod has one. When a pod calls the Kubernetes API, it authenticates using its ServiceAccount's JWT token. The ServiceAccount's permissions are controlled by RoleBindings. Unlike human users, ServiceAccounts live inside the cluster and are used by automated processes. If a pod does not need Kubernetes API access, set `automountServiceAccountToken: false`.
+
+5. **Why does AzureShop set `automountServiceAccountToken: false` on all ServiceAccounts?** — Because none of the 8 application pods ever call the Kubernetes API directly. They call Azure SQL, Application Insights, Service Bus — but not `kubernetes.default.svc`. Auto-mounting the token means a JWT credential sits in every pod's filesystem. If a pod was compromised, the attacker could use that token to probe the Kubernetes API. Disabling the auto-mount removes the credential entirely, reducing the attack surface.
+
+6. **What is the difference between Azure RBAC and Kubernetes RBAC?** — Azure RBAC controls who can run `kubectl` commands against the AKS cluster — it uses Azure AD identities and Azure role assignments (like `AKS RBAC Cluster Admin`). Kubernetes RBAC controls what processes running INSIDE the cluster can do — it uses ServiceAccounts, Roles, and RoleBindings. In AzureShop, `azure_rbac_enabled = true` means Azure RBAC handles human access, while Kubernetes RBAC handles internal service-to-service access. Both run simultaneously.
+
+7. **How does Workload Identity relate to ServiceAccounts?** — Workload Identity is a bridge between a Kubernetes ServiceAccount and an Azure Managed Identity. The ServiceAccount is annotated with `azure.workload.identity/client-id`, linking it to a Managed Identity's client ID. The AKS OIDC issuer signs the ServiceAccount token; Azure AD trusts this and exchanges it for an Azure AD token scoped to the Managed Identity. The pod then uses that Azure AD token to call Azure services (Key Vault, Service Bus, etc.) without any stored credentials. In AzureShop, notification-service uses this to read Key Vault secrets at runtime.
+
+8. **What is least privilege in RBAC and how does AzureShop apply it?** — Least privilege means granting each identity the minimum permissions it needs and nothing more. In AzureShop: application pods get their own ServiceAccounts with no K8s RBAC permissions (no RoleBindings) and `automountServiceAccountToken: false`. The CSI driver addon identity has only Key Vault Secrets User on the specific Key Vault. The developer has AKS Cluster Admin only on the dev cluster scope. No service can read another service's secrets because each ServiceAccount is separate with no cross-service access.
