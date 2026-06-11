@@ -29,6 +29,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 20. [What is the Difference Between a Service Endpoint and a Service Principal?](#q20-what-is-the-difference-between-a-service-endpoint-and-a-service-principal)
 21. [What is a Kubernetes Controller? How are Default Controllers Different from Managed Kubernetes Controllers?](#q21-what-is-a-kubernetes-controller-how-are-default-controllers-different-from-managed-kubernetes-controllers)
 22. [What is a Kubernetes Service? Full Working, Types, and How AzureShop Uses It?](#q22-what-is-a-kubernetes-service-full-working-types-and-how-azureshop-uses-it)
+23. [What is the Role of kube-proxy in Kubernetes?](#q23-what-is-the-role-of-kube-proxy-in-kubernetes)
 
 ---
 
@@ -2854,3 +2855,355 @@ By using the Service name `user-service`, nginx asks CoreDNS to resolve it → g
 6. **Where exactly are Services defined in AzureShop?** — In `helm/charts/{service-name}/templates/service.yaml` for each of the 8 services. Port values come from `helm/charts/{service-name}/values.yaml`. All are `type: ClusterIP`.
 7. **What is the difference between a Service and an Ingress?** — A Service works at Layer 4 (IP + port) and gives a stable address to a group of pods. An Ingress works at Layer 7 (HTTP) and routes requests based on URL path or hostname to different Services. You need both: Ingress for smart HTTP routing, Services as the stable destinations.
 8. **Why does api-gateway use service names like `user-service:3001` instead of pod IPs?** — Because pod IPs change every time a pod restarts. Service names are permanent — CoreDNS resolves `user-service` to the ClusterIP, and kube-proxy routes from the ClusterIP to a live pod. Using the service name means the configuration never needs to change regardless of pod restarts or scaling.
+
+---
+
+## Q23. What is the Role of kube-proxy in Kubernetes?
+
+### The One-Line Answer
+
+**kube-proxy is the traffic director on every node.** It makes sure that when a request arrives at a Service's virtual IP (ClusterIP), that request actually reaches a real, live pod — by programming the networking rules on the node's operating system.
+
+---
+
+### The Problem kube-proxy Solves
+
+In Q22 we learned that a Kubernetes Service has a **ClusterIP** — a virtual, permanent IP address (e.g. `10.0.134.22`). But here is the important thing:
+
+**A ClusterIP is NOT a real IP address. No actual network interface holds it. No physical device owns it.**
+
+It is completely virtual — it only exists as a rule in the node's kernel. If you try to ping a ClusterIP from outside the cluster, nothing responds. It is purely a routing trick.
+
+The question then is: **how does a packet sent to `10.0.134.22:3001` actually reach the user-service pod at `10.1.0.7:3001`?**
+
+The answer is **kube-proxy**.
+
+---
+
+### What is kube-proxy?
+
+**Think of kube-proxy like a postman inside your building.**
+
+Your building (Kubernetes node) receives a letter addressed to "Reception Desk, Room 10.0.134.22" (the ClusterIP). But Room 10.0.134.22 does not physically exist. The postman (kube-proxy) knows the real room numbers of the people who work at the reception desk (the pods). He grabs the letter and delivers it directly to one of the real rooms.
+
+```
+Letter arrives: "deliver to 10.0.134.22:3001"   (ClusterIP — virtual)
+     ↓
+Postman (kube-proxy) checks his routing table:
+"10.0.134.22 maps to: 10.1.0.7:3001 or 10.1.0.15:3001"
+     ↓
+Postman re-addresses the letter: "deliver to 10.1.0.7:3001"  (real pod IP)
+     ↓
+Letter delivered to the actual pod
+```
+
+kube-proxy does this at the **Linux kernel level** — it programs the kernel's packet filtering rules so this translation happens automatically for every packet, at wire speed, before any user-space code even sees the packet.
+
+---
+
+### Where Does kube-proxy Run?
+
+kube-proxy runs as a **DaemonSet** — meaning **one kube-proxy pod on every single node** in the cluster. It is not just on the control plane. Every worker node has its own kube-proxy.
+
+```
+Cluster: aks-azureshop-dev
+│
+├── Control Plane (managed by Azure)
+│
+├── Node: aks-system-vmss000000    → kube-proxy pod running here
+├── Node: aks-system-vmss000001    → kube-proxy pod running here
+├── Node: aks-user-vmss000000      → kube-proxy pod running here
+└── Node: aks-user-vmss000001      → kube-proxy pod running here
+```
+
+Why on every node? Because **any pod on any node** might need to call any Service. The routing rules must exist on every node so the translation can happen locally, without sending the packet to some central proxy first. Local = fast.
+
+---
+
+### How kube-proxy Works — Step by Step
+
+#### Step 1 — kube-proxy Watches the API Server
+
+kube-proxy runs a watch loop against the API Server — the same reconciliation pattern as controllers. It watches for:
+- **Service** objects — to know what ClusterIPs exist and which ports they use.
+- **EndpointSlice** objects — to know the live pod IPs behind each Service.
+
+```
+kube-proxy → API Server: "Watch Services and EndpointSlices"
+API Server → kube-proxy: "New Service created: user-service, ClusterIP 10.0.134.22, port 3001"
+API Server → kube-proxy: "EndpointSlice updated: pods are 10.1.0.7:3001 and 10.1.0.15:3001"
+```
+
+#### Step 2 — kube-proxy Programs iptables Rules
+
+When kube-proxy learns about a Service and its endpoints, it immediately programs **iptables rules** (Linux kernel packet filtering) on its node.
+
+The rules look like this conceptually:
+
+```
+Rule 1: "Any packet going to 10.0.134.22:3001 →
+         randomly send to EITHER 10.1.0.7:3001 OR 10.1.0.15:3001"
+
+Rule 2: "If you chose 10.1.0.7:3001, rewrite the destination IP
+         from 10.0.134.22 to 10.1.0.7 (DNAT)"
+```
+
+This rewriting of the destination IP is called **DNAT (Destination Network Address Translation)**. The kernel does this at the packet level — before the packet reaches any application.
+
+#### Step 3 — Packet Travels to the Pod
+
+After DNAT, the packet has the pod's real IP. The kernel routes it normally — either to a pod on the same node (no network hop) or across the node's network interface to a pod on a different node.
+
+```
+Source: api-gateway pod (10.1.0.3)
+Destination written by app: 10.0.134.22:3001   ← ClusterIP (virtual)
+
+iptables DNAT kicks in (kube-proxy programmed this):
+Destination rewritten to: 10.1.0.7:3001        ← real pod IP
+
+Packet travels to 10.1.0.7 on node aks-user-vmss000000
+user-service pod receives the packet ✅
+```
+
+The api-gateway pod thinks it talked to `10.0.134.22`. It has no idea that DNAT happened. It is completely transparent.
+
+#### Step 4 — Response Comes Back (SNAT)
+
+The response from the pod (`10.1.0.7`) goes back. The kernel also rewrites the source IP back to the ClusterIP (`10.0.134.22`) so the caller thinks the response came from the Service. This is **SNAT (Source NAT)**. Again, fully transparent.
+
+---
+
+### The Three Modes of kube-proxy
+
+kube-proxy can work in three different modes. The mode determines HOW it programs the node's networking rules.
+
+#### Mode 1 — iptables (Default in most clusters, including AKS)
+
+Programs Linux **iptables** rules — a chain of packet matching rules in the kernel.
+
+```
+Packet arrives at node
+  ↓
+Kernel checks iptables chain: PREROUTING
+  ↓
+Matches rule: "dest is 10.0.134.22:3001"
+  ↓
+Randomly picks one pod IP (50/50 for 2 pods) using iptables probability
+  ↓
+DNAT: rewrites destination to chosen pod IP
+  ↓
+Packet forwarded to pod
+```
+
+**Pros:** Stable, battle-tested, works on all Linux kernels.
+**Cons:** At very large scale (10,000+ Services), the iptables chain becomes very long → each packet must check through thousands of rules → can add latency. Also, iptables uses random selection (not true round-robin) so load distribution is not perfectly even.
+
+#### Mode 2 — IPVS (IP Virtual Server)
+
+Uses the Linux kernel's **IPVS** module — a purpose-built load balancing subsystem. Instead of a chain of rules (iptables), IPVS uses a hash table — O(1) lookup regardless of how many Services exist.
+
+```
+Packet arrives at node
+  ↓
+Kernel IPVS hash table lookup: "10.0.134.22:3001"
+  ↓
+IPVS picks pod using a proper load balancing algorithm:
+  - Round Robin
+  - Least Connections
+  - Source IP Hash (sticky sessions)
+  ↓
+DNAT → packet forwarded
+```
+
+**Pros:** Scales to 100,000+ Services without performance degradation. Better load balancing algorithms. Real round-robin.
+**Cons:** Requires IPVS kernel modules (available in AKS). Slightly more complex setup.
+
+#### Mode 3 — userspace (Legacy, not used anymore)
+
+Old mode where kube-proxy itself acted as a proxy in user space. Every packet went through the kube-proxy process. Very slow compared to kernel-level modes. Abandoned in modern Kubernetes.
+
+---
+
+### kube-proxy vs CoreDNS — Who Does What?
+
+These two are often confused because they both play a role in getting traffic to the right pod. They solve **different parts of the problem**.
+
+| | CoreDNS | kube-proxy |
+|---|---|---|
+| **What it does** | Translates a **name** to a ClusterIP | Translates a **ClusterIP** to a real pod IP |
+| **Layer** | DNS (name resolution) | Network (packet routing) |
+| **When it runs** | When your app does a DNS lookup | When a packet hits the ClusterIP |
+| **Output** | "user-service = 10.0.134.22" | "10.0.134.22 → 10.1.0.7 (DNAT in kernel)" |
+| **Where it runs** | Pods in kube-system namespace | DaemonSet on every node |
+
+**They work in sequence, not instead of each other:**
+
+```
+Step 1 (CoreDNS):
+  App says: connect to "user-service:3001"
+  DNS lookup: "user-service" → 10.0.134.22  (CoreDNS answers)
+
+Step 2 (kube-proxy):
+  Packet sent to 10.0.134.22:3001
+  iptables rule (written by kube-proxy) fires: DNAT → 10.1.0.7:3001
+  Packet reaches real pod
+```
+
+Remove CoreDNS → apps can't resolve service names → they don't know what IP to send to.
+Remove kube-proxy → apps resolve the ClusterIP correctly, but packets sent to that IP go nowhere because there are no iptables rules to forward them.
+
+**Both are required. Neither replaces the other.**
+
+---
+
+### kube-proxy and Load Balancing
+
+kube-proxy provides **basic load balancing** across pods. In iptables mode, it uses probability-based rules:
+
+```
+2 pods behind user-service:
+
+iptables rule chain:
+  Rule A: "50% chance → DNAT to 10.1.0.7:3001"
+  Rule B: "50% chance → DNAT to 10.1.0.15:3001"
+```
+
+For 3 pods:
+```
+  Rule A: "33% → pod 1"
+  Rule B: "50% of remaining → pod 2"   (= 33% overall)
+  Rule C: "100% of remaining → pod 3"  (= 33% overall)
+```
+
+This is **random selection**, not true round-robin. Under high traffic the distribution averages out, but individual request sequences are not perfectly equal.
+
+**Important:** kube-proxy load balancing is NOT sophisticated. It has no concept of:
+- Response time (it doesn't pick the fastest pod)
+- Connection count (it doesn't pick the least-loaded pod)
+- Session affinity (by default — can be configured with `sessionAffinity: ClientIP`)
+
+For sophisticated load balancing (health-aware, latency-weighted), you use a **service mesh** (Istio, Linkerd) which adds a sidecar proxy (Envoy) to every pod.
+
+---
+
+### What Happens When a Pod Dies — kube-proxy Reacts
+
+This is one of the most important behaviours to understand.
+
+```
+Scenario: user-service pod 10.1.0.7 crashes
+
+Step 1: Pod crashes → readiness probe fails (or pod disappears)
+Step 2: EndpointSlice Controller removes 10.1.0.7 from the EndpointSlice
+Step 3: API Server streams EndpointSlice update event to all kube-proxy instances
+Step 4: kube-proxy on EVERY node updates its iptables rules:
+        BEFORE: 50% → 10.1.0.7, 50% → 10.1.0.15
+        AFTER:  100% → 10.1.0.15
+Step 5: All new requests go only to 10.1.0.15
+        No requests go to the dead pod
+        
+Timeline: typically happens within 1-2 seconds of the pod dying
+```
+
+This is why Kubernetes achieves near-zero-downtime during pod failures. kube-proxy reacts within seconds of the EndpointSlice being updated.
+
+**In reverse — when a new pod starts:**
+```
+New user-service pod starts → IP: 10.1.1.22
+Passes readiness probe
+EndpointSlice updated: adds 10.1.1.22
+kube-proxy on all nodes: updates iptables
+         BEFORE: 100% → 10.1.0.15
+         AFTER:  50% → 10.1.0.15, 50% → 10.1.1.22
+New pod immediately starts receiving traffic
+```
+
+---
+
+### kube-proxy in AzureShop — Real Example
+
+In AzureShop, every time the user-service Helm chart is deployed:
+
+```
+helm upgrade --install user-service ./helm/charts/user-service --set image.tag=v1.0.2
+  ↓
+New user-service pods created (10.1.1.30, 10.1.1.31)
+  ↓
+EndpointSlice Controller updates: adds new pod IPs
+  ↓
+kube-proxy on aks-user-vmss000000 updates iptables:
+  "10.0.134.22:3001 → DNAT to 10.1.1.30 or 10.1.1.31"
+kube-proxy on aks-user-vmss000001 updates iptables (same rules)
+  ↓
+Old pods (10.1.0.7, 10.1.0.15) finish graceful shutdown
+  ↓
+EndpointSlice removes old IPs
+  ↓
+kube-proxy removes old iptables rules
+  ↓
+All traffic now reaches new pods with v1.0.2 ✅
+```
+
+api-gateway's nginx.conf never changed. CoreDNS still returns the same ClusterIP `10.0.134.22`. But kube-proxy silently swapped the real destination behind that IP. Zero downtime, zero configuration change.
+
+---
+
+### Full Picture — How Everything Connects
+
+```
+api-gateway pod wants to call user-service
+
+1. App code: fetch("http://user-service:3001/users/profile")
+                           ↓
+2. CoreDNS lookup: "user-service.dev.svc.cluster.local"
+                   returns: 10.0.134.22
+                           ↓
+3. TCP packet created:
+   src: 10.1.0.3 (api-gateway pod)
+   dst: 10.0.134.22:3001 (ClusterIP)
+                           ↓
+4. Packet enters node's kernel networking stack
+   iptables PREROUTING chain fires (written by kube-proxy):
+   "dst 10.0.134.22:3001 → DNAT to 10.1.0.7:3001"
+   dst rewritten: 10.1.0.7:3001
+                           ↓
+5. Kernel routes packet to 10.1.0.7
+   (if on same node: loopback/veth)
+   (if on different node: eth0 → Azure VNet → destination node)
+                           ↓
+6. user-service pod receives request at 10.1.0.7:3001
+                           ↓
+7. Response: src 10.1.0.7 → kernel rewrites to 10.0.134.22 (SNAT)
+   api-gateway sees response from 10.0.134.22 — consistent ✅
+
+Total time for steps 3-5: microseconds (kernel-level, no user-space)
+```
+
+---
+
+### kube-proxy vs No kube-proxy (Modern Alternatives)
+
+In very modern Kubernetes setups, kube-proxy is being **replaced by eBPF-based solutions**:
+
+| | kube-proxy (iptables) | Cilium (eBPF) |
+|---|---|---|
+| **How** | Programs iptables rules in kernel | Programs eBPF programs directly in kernel |
+| **Scale** | Degrades at 10k+ Services | Handles 100k+ Services efficiently |
+| **Observability** | Limited | Deep — per-packet visibility |
+| **Load balancing** | Random selection | True round-robin, maglev hashing |
+| **AzureShop** | Uses kube-proxy (default AKS) | Not used |
+
+AKS supports Cilium as an optional CNI. For AzureShop's scale (8 services, dev cluster), kube-proxy is perfectly sufficient.
+
+---
+
+### Interview Prep
+
+1. **What is kube-proxy and what does it do?** — kube-proxy runs on every node as a DaemonSet. It watches the API Server for Service and EndpointSlice changes, and programs iptables rules on the node so that packets sent to a Service's virtual ClusterIP get DNAT'd (destination rewritten) to a real pod IP. It is the mechanism that makes ClusterIPs actually work.
+2. **What is DNAT and why does kube-proxy use it?** — DNAT = Destination Network Address Translation. When a packet arrives at the node destined for a ClusterIP (which is virtual — no real device holds it), kube-proxy's iptables rules rewrite the destination to a real pod IP. The application never knows this happened — it thinks it talked directly to the ClusterIP.
+3. **What is the difference between kube-proxy and CoreDNS?** — CoreDNS translates a service name (like `user-service`) into a ClusterIP (`10.0.134.22`) — it does DNS resolution. kube-proxy translates the ClusterIP into a real pod IP at the packet level using iptables. They work in sequence: CoreDNS resolves the name, kube-proxy routes the packet. Both are required.
+4. **Why does kube-proxy run on every node, not just the control plane?** — Because any pod on any node may call any Service. The iptables rules must exist locally on every node so the routing happens at the kernel level without sending packets to a central proxy. Local kernel rules = microsecond latency.
+5. **What are the modes of kube-proxy?** — Three modes: **iptables** (default — kernel rule chain, works well at moderate scale), **IPVS** (hash table-based, O(1) lookup, better for 10k+ Services, better load balancing algorithms), and **userspace** (legacy, deprecated — kube-proxy process acted as proxy, very slow).
+6. **What happens in kube-proxy when a pod crashes?** — The pod fails its readiness probe → EndpointSlice Controller removes that pod's IP from the EndpointSlice → API Server streams the change to all kube-proxy instances → kube-proxy on every node updates its iptables rules to remove that pod IP → no new packets are routed to the dead pod. This happens within 1-2 seconds.
+7. **Does kube-proxy do load balancing?** — Yes, basic load balancing. In iptables mode it uses probability rules — each pod gets an equal random chance of receiving the next packet. It does NOT do latency-aware, connection-count-aware, or true round-robin balancing. For that, a service mesh (Istio/Linkerd with Envoy sidecar) is needed.
+8. **In AzureShop, when does kube-proxy update its rules?** — Every time a Helm deployment changes the running pods: old pods terminate, new pods start → EndpointSlice is updated → kube-proxy on all 4 nodes (2 system + 2 user) updates iptables rules → traffic silently shifts from old pod IPs to new pod IPs. The ClusterIP, DNS name, and nginx.conf never change.
