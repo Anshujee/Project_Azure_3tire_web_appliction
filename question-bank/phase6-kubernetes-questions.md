@@ -28,6 +28,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 19. [What are Service Endpoints? (Azure VNet Service Endpoints vs Kubernetes Endpoints)](#q19-what-are-service-endpoints-azure-vnet-service-endpoints-vs-kubernetes-endpoints)
 20. [What is the Difference Between a Service Endpoint and a Service Principal?](#q20-what-is-the-difference-between-a-service-endpoint-and-a-service-principal)
 21. [What is a Kubernetes Controller? How are Default Controllers Different from Managed Kubernetes Controllers?](#q21-what-is-a-kubernetes-controller-how-are-default-controllers-different-from-managed-kubernetes-controllers)
+22. [What is a Kubernetes Service? Full Working, Types, and How AzureShop Uses It?](#q22-what-is-a-kubernetes-service-full-working-types-and-how-azureshop-uses-it)
 
 ---
 
@@ -2438,3 +2439,418 @@ Every step in this flow is driven by a different controller — all working toge
 6. **What is the Operator Pattern?** — Writing a custom controller for a custom resource. The controller watches for that resource and manages a complex application automatically using the same reconciliation loop as built-in controllers. In AzureShop, the Prometheus Operator watches `PrometheusRule` objects and injects alert rules into Prometheus automatically.
 7. **What happens if kube-controller-manager crashes in self-managed vs AKS?** — In self-managed Kubernetes, all reconciliation stops — crashed pods are not replaced, dead nodes not detected, rollouts stall — and you get paged. In AKS, the Control Plane runs in HA mode managed by Microsoft — a standby instance takes over in seconds and their SRE team handles it.
 8. **How does a controller watch for changes efficiently without polling every second?** — Using the Kubernetes Watch mechanism. The controller does an initial LIST to sync its cache, then opens a long-lived WATCH stream to the API Server. Changes are pushed to the controller as events in real time. Changes go into a work queue and are processed asynchronously. This is fast (millisecond reaction time) and resource-efficient.
+
+---
+
+## Q22. What is a Kubernetes Service? Full Working, Types, and How AzureShop Uses It?
+
+### The Problem a Service Solves — Why We Need It
+
+Before understanding what a Service IS, understand WHY it exists.
+
+When Kubernetes starts a pod, it assigns the pod a private IP address (e.g. `10.1.0.7`). This IP is **temporary** — the moment the pod dies and is replaced by a new one, the new pod gets a completely different IP (e.g. `10.1.0.15`).
+
+**Real problem in AzureShop without a Service:**
+```
+api-gateway wants to call user-service
+api-gateway's nginx.conf says: "send request to 10.1.0.7:3001"
+
+Night 1: user-service pod crashes → replaced → new IP = 10.1.0.15
+Night 2: api-gateway still sends to 10.1.0.7 → CONNECTION REFUSED
+         api-gateway has no idea the IP changed
+         Every request to user-service fails
+```
+
+You would have to manually update the IP every time a pod restarts. That's impossible at scale.
+
+**A Kubernetes Service solves this by giving a permanent, stable network address** — one address that never changes, no matter how many times the pods behind it restart, scale up, or scale down.
+
+---
+
+### What is a Kubernetes Service?
+
+**Think of it like a reception desk at a hospital.**
+
+A hospital has many doctors (pods). Doctors change shifts, go on leave, move to different floors. If patients had to find each doctor's personal room number every time, it would be chaos.
+
+Instead, there is a **reception desk** (the Service). The patient always goes to the reception desk. The reception desk knows which doctors are available and sends the patient to the right one.
+
+```
+Patient (caller)
+    ↓
+Reception desk (Kubernetes Service — stable IP, never changes)
+    ↓  (load-balanced)
+    ├── Doctor 1 (pod 10.1.0.7 — healthy)
+    └── Doctor 2 (pod 10.1.0.15 — healthy)
+
+Doctor 3 goes on leave (pod crashes)?
+→ Reception desk automatically stops sending patients to Doctor 3
+→ Patient never knows Doctor 3 was unavailable
+```
+
+A **Kubernetes Service** is a stable virtual network endpoint that:
+- Has a permanent IP address (called **ClusterIP**) that never changes
+- Has a permanent DNS name that never changes
+- Automatically load-balances traffic across all healthy pods behind it
+- Automatically removes unhealthy pods from rotation (via readiness probes)
+
+---
+
+### How a Service Works Internally — Step by Step
+
+#### Step 1 — You Create a Service with a Selector
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: user-service        # the stable DNS name
+  namespace: dev
+spec:
+  type: ClusterIP
+  selector:
+    app: user-service        # match ALL pods with this label
+  ports:
+    - port: 3001             # the port callers use
+      targetPort: 3001       # the port the container listens on
+```
+
+The `selector` is the key — it says "this Service belongs to all pods labelled `app: user-service`."
+
+#### Step 2 — Kubernetes Assigns a Stable ClusterIP
+
+When you apply this Service, Kubernetes assigns it a **ClusterIP** — a virtual IP from the `service_cidr` range (in AzureShop: `10.0.0.0/16`). This IP is permanent for the lifetime of the Service.
+
+```
+Service: user-service
+ClusterIP: 10.0.134.22   ← this never changes
+DNS name:  user-service.dev.svc.cluster.local  ← this never changes
+```
+
+#### Step 3 — EndpointSlice Controller Tracks Healthy Pods
+
+The EndpointSlice Controller watches all pods with the matching label (`app: user-service`) and maintains a live list of their IPs. Only pods passing their readiness probe are in this list.
+
+```
+EndpointSlice for user-service:
+  10.1.0.7:3001   ← pod 1 (healthy, in rotation)
+  10.1.0.15:3001  ← pod 2 (healthy, in rotation)
+```
+
+#### Step 4 — kube-proxy Programs the Routing Rules
+
+On every node in the cluster, **kube-proxy** watches the EndpointSlice and programs **iptables rules** (or IPVS rules). These rules say:
+
+```
+"Any packet going to 10.0.134.22:3001 →
+  randomly send to either 10.1.0.7:3001 OR 10.1.0.15:3001"
+```
+
+This happens automatically on every node. So any pod on any node can reach user-service via its ClusterIP.
+
+#### Step 5 — DNS Resolution (The Magic Part)
+
+**CoreDNS** runs inside the cluster and provides DNS resolution. When api-gateway's nginx.conf says:
+
+```nginx
+server user-service:3001;
+```
+
+The DNS lookup `user-service` resolves to the ClusterIP `10.0.134.22`. The request goes to the ClusterIP. iptables routes it to one of the healthy pods. All transparently.
+
+```
+nginx (in api-gateway pod)
+  → DNS lookup: "user-service"
+  → CoreDNS returns: 10.0.134.22 (ClusterIP)
+  → Request hits 10.0.134.22:3001
+  → iptables on the node: "route to 10.1.0.7:3001"
+  → user-service pod receives the request
+```
+
+Pod restarts and gets new IP `10.1.1.9`? EndpointSlice updates → iptables updates → next request automatically goes to `10.1.1.9`. The nginx.conf never changes. Zero downtime.
+
+---
+
+### The Four Types of Kubernetes Services
+
+#### Type 1 — ClusterIP (Default)
+The most common type. Creates a virtual IP **only reachable inside the cluster**. No external access.
+
+```
+External world → ❌ cannot reach ClusterIP
+Pod inside cluster → ✅ can reach ClusterIP
+```
+
+```yaml
+spec:
+  type: ClusterIP        # default — internal only
+  ports:
+    - port: 3001
+      targetPort: 3001
+```
+
+**Use for:** Any service that should only be called by other services inside the cluster. In AzureShop — ALL 8 microservices use ClusterIP because they are never directly accessed from the internet.
+
+---
+
+#### Type 2 — NodePort
+Opens a port (30000–32767) on **every node's IP address**. External traffic can reach the service by hitting `<any-node-IP>:<nodePort>`.
+
+```
+External world → NodeIP:32001
+                     ↓
+               Service (NodePort)
+                     ↓
+               Pod 1 or Pod 2
+```
+
+```yaml
+spec:
+  type: NodePort
+  ports:
+    - port: 3001
+      targetPort: 3001
+      nodePort: 32001    # opens on every node
+```
+
+**Problems:** Exposes node IPs publicly. Port range is ugly (32001 not 80/443). No load balancing across nodes. Not used in production.
+
+**Use for:** Development/testing only, or on-premises where you have no cloud load balancer.
+
+**AzureShop:** NOT used. We use ClusterIP + Ingress instead.
+
+---
+
+#### Type 3 — LoadBalancer
+Builds on NodePort but also **provisions a cloud load balancer automatically** (via the Cloud Controller Manager). Gives a clean public IP.
+
+```
+Internet
+    ↓
+Azure Load Balancer (Public IP: 134.33.223.224)  ← provisioned automatically
+    ↓
+NodePort on each node
+    ↓
+Pod 1 or Pod 2
+```
+
+```yaml
+spec:
+  type: LoadBalancer      # triggers Cloud Controller Manager
+```
+
+When you apply this in AKS:
+- Cloud Controller Manager calls the Azure API
+- Azure provisions a Load Balancer + assigns a Public IP
+- The IP appears in `kubectl get svc` under EXTERNAL-IP
+
+**AzureShop:** Used by **NGINX Ingress Controller only**. The Ingress Controller's Service is `type: LoadBalancer` — that's how it got the public IP `134.33.223.224`. All actual application services stay as ClusterIP; the Ingress is the single entry point.
+
+---
+
+#### Type 4 — ExternalName
+Maps a Service name to an **external DNS name** (outside the cluster). No proxying, no load balancing — pure DNS alias.
+
+```yaml
+spec:
+  type: ExternalName
+  externalName: mydb.postgres.database.azure.com
+```
+
+Now inside the cluster, pods can call `postgres-db` and it resolves to `mydb.postgres.database.azure.com`. Useful for abstracting external services so you can swap them without changing application code.
+
+**AzureShop:** NOT used, but a valid pattern for referencing Azure SQL or Cosmos DB by a cluster-internal name.
+
+---
+
+### Quick Comparison Table
+
+| Type | Accessible From | Gets External IP | Use Case |
+|---|---|---|---|
+| **ClusterIP** | Inside cluster only | No | Internal service-to-service communication |
+| **NodePort** | NodeIP:port from outside | No (you use node IP) | Dev/test, on-premises |
+| **LoadBalancer** | Internet via cloud LB | Yes (cloud-assigned) | Single public-facing entry point |
+| **ExternalName** | Inside cluster only | No | Abstract an external DNS name |
+
+---
+
+### Kubernetes Service vs Ingress — What is the Difference?
+
+This confuses many beginners. Both deal with traffic. Here is the exact difference:
+
+| | Service | Ingress |
+|---|---|---|
+| **What it is** | A stable network endpoint for pods | An HTTP routing rule |
+| **Works at** | Layer 4 (TCP/UDP, IP+port) | Layer 7 (HTTP, URL path, hostname) |
+| **Routes by** | Just IP and port | URL path, hostname, headers |
+| **Needs a controller?** | No — built into Kubernetes | Yes — needs Ingress Controller (e.g. NGINX) |
+| **One per service?** | Yes — every service has its own | One Ingress can route to many services |
+
+**Think of it this way:**
+- **Service** = the phone number of each department in a company
+- **Ingress** = the receptionist who listens to what you need and transfers you to the right department
+
+In AzureShop:
+```
+Internet → NGINX Ingress Controller (Layer 7 routing)
+               ├── /api/* → api-gateway Service (ClusterIP)
+               └── /*     → frontend Service (ClusterIP)
+```
+
+The Ingress handles the smart routing. The Services are the stable addresses of each destination.
+
+---
+
+### Where Are Services Defined in AzureShop? — Exact Locations
+
+**Yes, AzureShop absolutely uses Services.** Every single microservice has its own Service definition. Here is the exact location of every Service file:
+
+```
+AzureShop/
+└── helm/
+    └── charts/
+        ├── user-service/
+        │   ├── templates/
+        │   │   └── service.yaml        ← Service definition (template)
+        │   └── values.yaml             ← port: 3001, targetPort: 3001
+        │
+        ├── product-service/
+        │   ├── templates/
+        │   │   └── service.yaml        ← Service definition (template)
+        │   └── values.yaml             ← port: 3002, targetPort: 3002
+        │
+        ├── cart-service/
+        │   ├── templates/
+        │   │   └── service.yaml        ← port: 3003
+        │
+        ├── order-service/
+        │   ├── templates/
+        │   │   └── service.yaml        ← port: 3004
+        │
+        ├── payment-service/
+        │   ├── templates/
+        │   │   └── service.yaml        ← port: 3005
+        │
+        ├── notification-service/
+        │   ├── templates/
+        │   │   └── service.yaml        ← port: 3006
+        │
+        ├── frontend/
+        │   ├── templates/
+        │   │   └── service.yaml        ← port: 3000
+        │
+        └── api-gateway/
+            ├── templates/
+            │   └── service.yaml        ← port: 8080
+```
+
+**All 8 services are type: ClusterIP.** None are exposed directly to the internet.
+
+---
+
+### The Actual Service Template (from your project)
+
+Every service in AzureShop uses the same Helm template. Here is the actual file from `helm/charts/user-service/templates/service.yaml`:
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "azureshop.name" . }}      # resolves to "user-service"
+  namespace: {{ .Release.Namespace }}          # resolves to "dev"
+  labels:
+    {{- include "azureshop.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP                              # internal only
+  ports:
+    - port: {{ .Values.service.port }}         # 3001 (from values.yaml)
+      targetPort: {{ .Values.service.targetPort }}  # 3001
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "azureshop.selectorLabels" . | nindent 4 }}
+    # resolves to: app: user-service
+    # matches all pods labelled app: user-service
+```
+
+The `selector` is the bridge between the Service and the pods — it's how the Service knows which pods to route traffic to.
+
+---
+
+### All 8 Services at a Glance
+
+| Service Name | DNS Name (inside cluster) | Port | Type |
+|---|---|---|---|
+| `user-service` | `user-service.dev.svc.cluster.local` | 3001 | ClusterIP |
+| `product-service` | `product-service.dev.svc.cluster.local` | 3002 | ClusterIP |
+| `cart-service` | `cart-service.dev.svc.cluster.local` | 3003 | ClusterIP |
+| `order-service` | `order-service.dev.svc.cluster.local` | 3004 | ClusterIP |
+| `payment-service` | `payment-service.dev.svc.cluster.local` | 3005 | ClusterIP |
+| `notification-service` | `notification-service.dev.svc.cluster.local` | 3006 | ClusterIP |
+| `frontend` | `frontend.dev.svc.cluster.local` | 3000 | ClusterIP |
+| `api-gateway` | `api-gateway.dev.svc.cluster.local` | 8080 | ClusterIP |
+
+Inside the same namespace (`dev`), pods can use the **short name** — just `user-service:3001`. Kubernetes CoreDNS automatically appends `.dev.svc.cluster.local`.
+
+---
+
+### How Services Are Used in AzureShop — Complete Traffic Flow
+
+```
+User's browser: GET http://134.33.223.224/api/users/profile
+      ↓
+Azure Load Balancer (134.33.223.224)    ← provisioned by Cloud Controller Manager
+      ↓                                   for NGINX Ingress Service (LoadBalancer type)
+NGINX Ingress Controller pod
+      ↓   path starts with /api/
+Ingress rule → backend: api-gateway:8080
+      ↓
+api-gateway Service (ClusterIP: 10.0.45.12)
+      ↓   kube-proxy routes to a healthy pod
+api-gateway pod (nginx.conf running)
+      ↓   location /api/users/ → proxy_pass http://user_service/users/
+      ↓   DNS: "user-service" → CoreDNS → 10.0.134.22 (ClusterIP)
+user-service Service (ClusterIP: 10.0.134.22)
+      ↓   kube-proxy routes to a healthy pod
+user-service pod (Node.js app)
+      ↓
+Queries Azure SQL Database
+      ↓
+Returns JSON response all the way back up the chain
+```
+
+Every arrow that crosses a Service boundary goes through the ClusterIP → iptables → pod resolution. All transparent. All automatic. All load-balanced.
+
+---
+
+### Why api-gateway Uses Service Names Not IPs — The Key Insight
+
+Look at `services/api-gateway/nginx.conf` in the project:
+
+```nginx
+upstream user_service {
+  server user-service:3001;      # ← SERVICE NAME, not an IP
+}
+upstream product_service {
+  server product-service:3002;   # ← SERVICE NAME, not an IP
+}
+```
+
+This is intentional and critical. If nginx used pod IPs directly (`10.1.0.7:3001`), the moment that pod restarts and gets a new IP, nginx would be pointing to a dead address.
+
+By using the Service name `user-service`, nginx asks CoreDNS to resolve it → gets the ClusterIP → kube-proxy routes to a live pod. This works forever, regardless of how many times pods restart, scale, or move to different nodes.
+
+**This is the entire reason Services exist.**
+
+---
+
+### Interview Prep
+
+1. **What is a Kubernetes Service and why do we need it?** — A Service is a stable network endpoint (permanent IP + DNS name) that sits in front of pods. We need it because pod IPs are temporary — they change every time a pod restarts. The Service gives callers a permanent address that never changes, regardless of what happens to the pods behind it.
+2. **How does a Service know which pods to route to?** — Through a `selector` (label matching). The Service selects all pods that have the matching label (e.g. `app: user-service`). The EndpointSlice Controller maintains the live list of IPs of those pods. Only pods passing their readiness probe are in the list.
+3. **What is a ClusterIP and how is it different from a pod IP?** — A ClusterIP is a virtual IP assigned to a Service — it never changes and is permanent. A pod IP is assigned to a specific pod — it changes every time the pod restarts. The ClusterIP is the stable address; pod IPs are the temporary destinations behind it.
+4. **What is the difference between ClusterIP, NodePort, and LoadBalancer?** — ClusterIP is internal only — accessible only inside the cluster. NodePort opens a port on every node's physical IP — accessible from outside but ugly. LoadBalancer provisions a cloud load balancer (in AKS via Cloud Controller Manager) and gives a clean public IP — the proper way to expose a service to the internet.
+5. **How are Services used in AzureShop?** — All 8 microservices have ClusterIP Services. None are directly exposed to the internet. The NGINX Ingress Controller has a LoadBalancer Service that got the public IP `134.33.223.224`. The Ingress routes HTTP traffic by URL path to the correct ClusterIP Service. api-gateway's nginx.conf references backend services by their Service DNS name (e.g. `user-service:3001`) not by pod IP.
+6. **Where exactly are Services defined in AzureShop?** — In `helm/charts/{service-name}/templates/service.yaml` for each of the 8 services. Port values come from `helm/charts/{service-name}/values.yaml`. All are `type: ClusterIP`.
+7. **What is the difference between a Service and an Ingress?** — A Service works at Layer 4 (IP + port) and gives a stable address to a group of pods. An Ingress works at Layer 7 (HTTP) and routes requests based on URL path or hostname to different Services. You need both: Ingress for smart HTTP routing, Services as the stable destinations.
+8. **Why does api-gateway use service names like `user-service:3001` instead of pod IPs?** — Because pod IPs change every time a pod restarts. Service names are permanent — CoreDNS resolves `user-service` to the ClusterIP, and kube-proxy routes from the ClusterIP to a live pod. Using the service name means the configuration never needs to change regardless of pod restarts or scaling.
