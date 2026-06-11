@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration).
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison).
 
 ---
 
@@ -32,6 +32,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 23. [What is the Role of kube-proxy in Kubernetes?](#q23-what-is-the-role-of-kube-proxy-in-kubernetes)
 24. [What are Labels and Selectors in Kubernetes? How are They Different and How Does AzureShop Use Them?](#q24-what-are-labels-and-selectors-in-kubernetes-how-are-they-different-and-how-does-azureshop-use-them)
 25. [What is Kubernetes RBAC? How Does it Work, What are Roles, RoleBindings, ClusterRoles, and ServiceAccounts?](#q25-what-is-kubernetes-rbac-how-does-it-work-what-are-roles-rolebindings-clusterroles-and-serviceaccounts)
+26. [What is a Service Mesh? What is Istio, How Does it Work, and What Problems Does it Solve in Kubernetes?](#q26-what-is-a-service-mesh-what-is-istio-how-does-it-work-and-what-problems-does-it-solve-in-kubernetes)
 
 ---
 
@@ -4400,3 +4401,562 @@ in API group "" in the namespace "production"
 7. **How does Workload Identity relate to ServiceAccounts?** — Workload Identity is a bridge between a Kubernetes ServiceAccount and an Azure Managed Identity. The ServiceAccount is annotated with `azure.workload.identity/client-id`, linking it to a Managed Identity's client ID. The AKS OIDC issuer signs the ServiceAccount token; Azure AD trusts this and exchanges it for an Azure AD token scoped to the Managed Identity. The pod then uses that Azure AD token to call Azure services (Key Vault, Service Bus, etc.) without any stored credentials. In AzureShop, notification-service uses this to read Key Vault secrets at runtime.
 
 8. **What is least privilege in RBAC and how does AzureShop apply it?** — Least privilege means granting each identity the minimum permissions it needs and nothing more. In AzureShop: application pods get their own ServiceAccounts with no K8s RBAC permissions (no RoleBindings) and `automountServiceAccountToken: false`. The CSI driver addon identity has only Key Vault Secrets User on the specific Key Vault. The developer has AKS Cluster Admin only on the dev cluster scope. No service can read another service's secrets because each ServiceAccount is separate with no cross-service access.
+
+---
+
+## Q26. What is a Service Mesh? What is Istio, How Does it Work, and What Problems Does it Solve in Kubernetes?
+
+### The Problem — What Happens Without a Service Mesh
+
+In a microservices architecture like AzureShop, dozens of services talk to each other constantly:
+
+```
+frontend → api-gateway → user-service
+                       → product-service
+                       → cart-service → order-service → payment-service
+                                                      → notification-service
+```
+
+Every one of these connections is a network call. And with network calls come real problems that every production team has to solve:
+
+**Problem 1 — Security:** How do you know that the request coming into payment-service is really from order-service and not from a hacker who got inside the cluster? With plain Kubernetes, pod-to-pod traffic is unencrypted — anyone who can see network traffic can read your data.
+
+**Problem 2 — Reliability:** What happens when product-service is slow or down? Does cart-service wait forever? Does it keep hammering a broken service? You need retries, timeouts, and circuit breakers — but writing that logic in every service is repetitive and error-prone.
+
+**Problem 3 — Observability:** How do you know how long each service call takes? Which service is causing the most errors? Where is the bottleneck in a chain of 6 services? Kubernetes gives you logs, but tracing a request through multiple hops is very hard without extra tooling.
+
+**Problem 4 — Traffic control:** How do you roll out a new version of payment-service to 10% of traffic while keeping 90% on the old version? How do you route users from a specific country to a specific version? kube-proxy can only do random load balancing — it cannot do percentage splits or header-based routing.
+
+**A service mesh solves all four of these problems without changing a single line of application code.**
+
+---
+
+### What is a Service Mesh?
+
+A service mesh is a **dedicated infrastructure layer** that handles all service-to-service (east-west) communication inside a Kubernetes cluster. It is called a "mesh" because every service is wrapped in it — like a net covering all services simultaneously.
+
+The key insight: instead of making each developer write retry logic, TLS handshake code, and metrics instrumentation in every service, the service mesh does it automatically at the network level. Your application code stays simple — it just makes HTTP calls. The mesh handles everything else invisibly.
+
+Think of it like a **phone company's network**. When you make a call, you don't personally implement encryption, routing, call quality monitoring, or retry logic. The network infrastructure does it for you. A service mesh is the phone company network for your microservices.
+
+---
+
+### The Sidecar Pattern — How a Service Mesh Works
+
+The core mechanism of a service mesh is the **sidecar proxy**. Here is what it means:
+
+In standard Kubernetes, a pod has one container — your application:
+```
+Pod: order-service
+  └── container: order-service (your Node.js app, port 3004)
+```
+
+With a service mesh, a second container (the sidecar proxy) is automatically injected into every pod:
+```
+Pod: order-service
+  ├── container: order-service (your Node.js app, port 3004)
+  └── container: istio-proxy  (Envoy proxy — injected automatically, port 15001)
+```
+
+The sidecar proxy sits between your application and the network. Every single packet going IN or OUT of the pod passes through the proxy first. Your application code never changes — it still thinks it is sending plain HTTP to `payment-service:3005`. But in reality:
+
+```
+order-service app
+  → sends plain HTTP to localhost:15001 (Envoy intercepts via iptables rule)
+  → Envoy encrypts with mTLS, adds tracing headers, applies retry policy
+  → sends encrypted traffic to payment-service pod's Envoy sidecar
+  → payment-service Envoy verifies certificate, decrypts
+  → delivers plain HTTP to payment-service app
+```
+
+Neither order-service nor payment-service knows any of this happened. The mesh is completely transparent to the application.
+
+---
+
+### What is Istio?
+
+Istio is the most widely used open-source service mesh. It is a CNCF (Cloud Native Computing Foundation) graduated project, backed by Google, IBM, and Lyft. It sits on top of Kubernetes and provides:
+
+- **Automatic mTLS** — all pod-to-pod traffic is encrypted and mutually authenticated
+- **Traffic management** — percentage splits, header routing, retries, timeouts, circuit breakers
+- **Observability** — automatic metrics, distributed tracing, and access logs for every service call
+- **Security policy** — which service is allowed to talk to which other service (authorization policies)
+
+Istio uses **Envoy** as its sidecar proxy. Envoy is a high-performance C++ proxy originally built at Lyft. Istio manages all the Envoy sidecars centrally.
+
+---
+
+### Istio Architecture — Control Plane vs Data Plane
+
+Istio has two layers: the **control plane** and the **data plane**.
+
+#### Data Plane
+
+The data plane is all the Envoy sidecar proxies running inside every pod. There can be hundreds of them — one per pod. They are the ones actually handling traffic, enforcing policies, and collecting metrics.
+
+```
+Pod: user-service     Pod: product-service    Pod: cart-service
+  ├── app container     ├── app container        ├── app container
+  └── envoy proxy       └── envoy proxy          └── envoy proxy
+       ↑ data plane          ↑ data plane              ↑ data plane
+```
+
+#### Control Plane — istiod
+
+istiod (pronounced "Istio-dee") is the single control plane process in Istio. It runs in the `istio-system` namespace and does three things:
+
+**1. Pilot — Traffic management config distributor**
+You define routing rules (VirtualService, DestinationRule) as Kubernetes objects. Pilot reads them and translates them into Envoy configuration, then pushes that config to every Envoy sidecar across the cluster. Every proxy knows the full routing rules without you configuring each one manually.
+
+**2. Citadel — Certificate authority**
+Citadel issues and rotates TLS certificates for every ServiceAccount in the cluster. Each Envoy sidecar gets a unique certificate proving its identity (e.g., "I am the payment-service ServiceAccount"). When two services connect, they verify each other's certificates — this is mutual TLS (mTLS).
+
+**3. Galley — Config validation**
+Validates that the Istio configuration objects you write are correct before applying them. Catches typos and invalid rules before they reach the proxies.
+
+```
+                        istiod (control plane)
+                    ┌───────────────────────────┐
+                    │  Pilot  │ Citadel │ Galley │
+                    └───────────────────────────┘
+                         │          │
+                    push config   issue certs
+                         │          │
+        ┌────────────────┼──────────┼────────────────┐
+        ↓                ↓          ↓                 ↓
+   envoy proxy      envoy proxy  envoy proxy     envoy proxy
+   (user-service)  (product)    (cart)          (payment)
+        ↑                                             ↑
+        └─────── encrypted mTLS traffic ─────────────┘
+```
+
+---
+
+### The Five Core Capabilities of Istio
+
+#### Capability 1: Mutual TLS (mTLS) — Automatic Encryption
+
+In plain Kubernetes, all pod-to-pod traffic is unencrypted plaintext. Anyone who can observe the network inside the cluster (a compromised pod, a malicious node agent) can read everything — API responses, database queries, user data.
+
+With Istio mTLS:
+- Every pod gets a **SPIFFE** (Secure Production Identity Framework For Everyone) certificate issued by Citadel
+- The certificate identity is tied to the pod's **ServiceAccount**: `spiffe://cluster.local/ns/dev/sa/order-service`
+- When order-service talks to payment-service, both Envoy proxies exchange certificates and verify each other (that is the "mutual" part — both sides authenticate, not just the server)
+- All traffic is encrypted with TLS 1.3
+
+```
+order-service (cert: sa/order-service)
+  → Envoy: "Here is my cert. Who are you?"
+  ← payment-service Envoy: "Here is my cert: sa/payment-service"
+  → Both verified → encrypted channel established
+  → plain HTTP inside the app; TLS outside
+```
+
+This works in two modes:
+- **PERMISSIVE** — accepts both plaintext and mTLS (for gradual rollout)
+- **STRICT** — rejects all plaintext, only mTLS allowed (production mode)
+
+In AzureShop, without Istio, inter-service traffic goes over plain HTTP. With Istio in STRICT mode, every one of those 20+ service calls per request would be automatically encrypted with zero code changes.
+
+#### Capability 2: Traffic Management
+
+Istio gives you precise control over how traffic flows between services. This is where it goes far beyond kube-proxy's random load balancing.
+
+**VirtualService** — defines routing rules for traffic TO a service:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: product-service
+  namespace: dev
+spec:
+  hosts:
+    - product-service          # applies to traffic going to product-service
+  http:
+    # Canary: 10% of traffic to v2, 90% to v1
+    - route:
+        - destination:
+            host: product-service
+            subset: v1         # defined in DestinationRule below
+          weight: 90
+        - destination:
+            host: product-service
+            subset: v2
+          weight: 10
+```
+
+**DestinationRule** — defines subsets (versions) of a service and load balancing policy:
+
+```yaml
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: product-service
+  namespace: dev
+spec:
+  host: product-service
+  trafficPolicy:
+    loadBalancer:
+      simple: LEAST_CONN       # route to pod with fewest active connections
+  subsets:
+    - name: v1
+      labels:
+        version: v1.0.0        # matches pods with this label
+    - name: v2
+      labels:
+        version: v2.0.0
+```
+
+**Retries and Timeouts:**
+
+```yaml
+http:
+  - timeout: 3s                # if no response in 3s, fail fast
+    retries:
+      attempts: 3              # retry up to 3 times
+      perTryTimeout: 1s        # each try gets 1s
+      retryOn: 5xx,reset,connect-failure
+    route:
+      - destination:
+          host: payment-service
+```
+
+Without this, if payment-service is slow, order-service hangs until TCP timeout (minutes). With Istio, it fails fast in 3s and retries.
+
+**Header-based routing:**
+
+```yaml
+http:
+  - match:
+      - headers:
+          x-user-type:
+            exact: premium     # premium users get v2
+    route:
+      - destination:
+          host: product-service
+          subset: v2
+  - route:                     # everyone else gets v1
+      - destination:
+          host: product-service
+          subset: v1
+```
+
+This lets you A/B test by user type, route by geography, or test a new version for internal employees — all without touching application code.
+
+#### Capability 3: Circuit Breaker
+
+A circuit breaker prevents a failing service from taking down all its callers. The name comes from electrical circuit breakers — if current is too high, the breaker trips and cuts the circuit before it causes a fire.
+
+Without circuit breaker:
+```
+order-service → payment-service (DOWN, 5s timeout)
+             → waits 5s
+             → request queue fills up
+             → order-service runs out of threads
+             → order-service goes down
+             → cart-service goes down (was calling order-service)
+             → whole platform down
+```
+This is called a **cascading failure**.
+
+With Istio circuit breaker (configured in DestinationRule):
+
+```yaml
+spec:
+  trafficPolicy:
+    outlierDetection:
+      consecutive5xxErrors: 5         # if 5 consecutive errors from one pod
+      interval: 30s                   # in a 30-second window
+      baseEjectionTime: 30s           # eject that pod for 30s
+      maxEjectionPercent: 50          # never eject more than 50% of pods
+    connectionPool:
+      http:
+        http1MaxPendingRequests: 100  # max 100 pending requests
+        http2MaxRequests: 1000
+```
+
+Istio tracks error rates per pod. If a pod returns 5 errors in a row, Envoy stops sending traffic to it for 30 seconds. The pod "cools off" while the rest of the service keeps serving traffic. After 30 seconds, one request is tried again — if it succeeds, the pod comes back; if not, it is ejected again for longer.
+
+This stops cascading failures cold.
+
+#### Capability 4: Observability — Automatic Metrics, Tracing, and Logs
+
+Without a service mesh, you have to add metrics, tracing, and logging code to every service manually. With Istio, it is completely automatic — every Envoy sidecar emits data about every request it handles.
+
+**Automatic Metrics (scraped by Prometheus):**
+Every Envoy proxy exports these metrics for every service-to-service call:
+- `istio_requests_total` — total request count with labels: source service, destination service, response code
+- `istio_request_duration_milliseconds` — request latency histogram
+- `istio_request_bytes` / `istio_response_bytes` — payload sizes
+
+These let you build dashboards showing: p50/p95/p99 latency per service pair, error rates, request volumes — all without writing a single line of metrics code in your application.
+
+**Distributed Tracing (via Jaeger or Zipkin):**
+Every request that enters the mesh gets a trace ID. Each Envoy sidecar in the chain adds a span to the trace. At the end you can see the full journey of one request:
+
+```
+Request: POST /api/orders  (trace-id: abc123)
+  └── api-gateway (2ms)
+        └── order-service (45ms)
+              ├── cart-service (8ms)      ← this one is slow
+              └── payment-service (12ms)
+```
+
+You can immediately see that cart-service is the bottleneck. Without tracing, you would only know "the order took 45ms" with no idea where the time went.
+
+**Access Logs:**
+Every proxy logs every request with: source, destination, method, path, response code, latency. This is the complete audit trail of all inter-service communication.
+
+#### Capability 5: Authorization Policy — Who Can Call Whom
+
+On top of mTLS (which proves identity), Istio's AuthorizationPolicy defines which services are allowed to talk to which. This is Istio's version of NetworkPolicy, but at Layer 7 (HTTP) instead of Layer 3/4 (IP/port).
+
+```yaml
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: payment-service-policy
+  namespace: dev
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: payment-service   # applies to payment-service pods
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals:
+              - "cluster.local/ns/dev/sa/order-service"   # only order-service can call
+    - to:
+        - operation:
+            methods: ["POST"]               # only POST allowed
+            paths: ["/payments/*"]          # only to /payments/ path
+```
+
+This is extremely precise: payment-service only accepts POST requests to `/payments/*` from order-service. cart-service trying to call payment-service directly would get `403 Forbidden` — even though both are in the same namespace and the same cluster.
+
+In AzureShop without Istio, the NetworkPolicy blocks at the IP/port level. With Istio, you can additionally block at the HTTP method + path level, verified by cryptographic identity.
+
+---
+
+### Istio's Key Resource Types — Full Reference
+
+| Resource | API Group | Purpose |
+|---|---|---|
+| **VirtualService** | `networking.istio.io` | Routing rules: where does traffic for a service go? Weight splits, header matching, retries, timeouts |
+| **DestinationRule** | `networking.istio.io` | Policies after routing: load balancing algorithm, circuit breaker, subsets (versions) |
+| **Gateway** | `networking.istio.io` | Ingress/egress at the mesh boundary — replaces NGINX Ingress for north-south traffic |
+| **ServiceEntry** | `networking.istio.io` | Register external services (outside the cluster) so Istio can manage traffic to them |
+| **PeerAuthentication** | `security.istio.io` | Sets mTLS mode (PERMISSIVE or STRICT) for a namespace or specific workloads |
+| **AuthorizationPolicy** | `security.istio.io` | Who is allowed to call whom (Layer 7 access control) |
+| **RequestAuthentication** | `security.istio.io` | Validates JWT tokens on incoming requests (end-user authentication at the mesh level) |
+| **EnvoyFilter** | `networking.istio.io` | Advanced: directly modify Envoy proxy config (low-level escape hatch) |
+| **Sidecar** | `networking.istio.io` | Controls which services a pod's Envoy knows about (reduces memory usage at scale) |
+
+---
+
+### North-South vs East-West Traffic
+
+Understanding where a service mesh fits requires knowing these two directions:
+
+**North-South traffic:** Traffic flowing IN from the internet to the cluster, or OUT from the cluster to the internet.
+- In AzureShop: Azure Application Gateway → NGINX Ingress → api-gateway
+- Handled by: Ingress controllers, Application Gateway, Load Balancers
+- Istio can handle this too via its **Gateway** resource (replaces NGINX Ingress)
+
+**East-West traffic:** Traffic flowing between services INSIDE the cluster.
+- In AzureShop: api-gateway → user-service, order-service → payment-service, etc.
+- Currently handled by: Kubernetes ClusterIP Services + kube-proxy (plain HTTP, no encryption, no tracing)
+- Service mesh is designed specifically for this type of traffic
+
+```
+Internet
+    ↓ (north-south — NGINX Ingress handles this)
+api-gateway
+    ↓ (east-west — service mesh handles this)
+user-service ←→ cart-service ←→ order-service ←→ payment-service
+```
+
+---
+
+### How Istio Injects Sidecars Automatically
+
+You don't manually add the Envoy container to every pod spec. Istio uses a **Mutating Webhook** to inject it automatically.
+
+When you label a namespace with `istio-injection: enabled`:
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dev
+  labels:
+    istio-injection: enabled    # ← this one label activates automatic injection
+```
+
+Every new pod created in this namespace goes through the following process:
+
+```
+1. You run: kubectl apply -f deployment.yaml  (1 container defined)
+2. K8s API Server receives the request
+3. Mutating Admission Webhook fires (registered by Istio)
+4. Istio webhook modifies the pod spec:
+   - Adds init container: istio-init (sets iptables rules to intercept all traffic)
+   - Adds sidecar container: istio-proxy (the Envoy proxy)
+5. Pod is created with 3 containers instead of 1 (your app + init + proxy)
+6. Envoy sidecar registers with istiod and gets its config + certificate
+```
+
+Your Deployment YAML does not change at all. The injection is completely transparent.
+
+---
+
+### Istio vs Pure Kubernetes — Side by Side
+
+| Feature | Plain Kubernetes | With Istio |
+|---|---|---|
+| **Pod-to-pod encryption** | No — plain HTTP | Yes — automatic mTLS |
+| **Service identity** | None — any pod can call any pod | SPIFFE certificate per ServiceAccount |
+| **Who can call whom** | NetworkPolicy (IP/port level) | AuthorizationPolicy (HTTP method/path/identity) |
+| **Load balancing** | Random (kube-proxy iptables) | Round-robin, least-conn, random, consistent-hash |
+| **Retries** | None — you must code it | Automatic per VirtualService rules |
+| **Timeouts** | TCP timeout (minutes) | Per-request timeout (seconds) |
+| **Circuit breaker** | None — cascading failures possible | Automatic outlier detection + ejection |
+| **Canary deployments** | Not possible — only by replica count | Precise percentage weight in VirtualService |
+| **Header-based routing** | Not possible | Full HTTP header matching |
+| **Request tracing** | Manual — you must add tracing code | Automatic — every request traced |
+| **Per-request metrics** | Manual — you must add Prometheus code | Automatic — Envoy emits all metrics |
+| **Access logs** | Container stdout only | Full mesh-wide access log per request |
+
+---
+
+### Istio in AzureShop — What Would Change
+
+AzureShop does not currently use Istio. Here is exactly what exists today vs what Istio would add:
+
+**Today (plain K8s):**
+```
+api-gateway (NGINX) → user-service:3001   (plain HTTP, no auth, no tracing)
+                    → product-service:3002 (plain HTTP, no auth, no tracing)
+                    → order-service:3004   (plain HTTP, no auth, no tracing)
+                         → payment-service:3005 (plain HTTP, VERY sensitive!)
+```
+
+**With Istio:**
+```
+api-gateway → user-service       (mTLS, verified cert, auto retry, traced)
+           → product-service      (mTLS, verified cert, circuit breaker, traced)
+           → order-service        (mTLS, verified cert, timeout 3s, traced)
+                → payment-service (mTLS, ONLY order-service allowed via AuthzPolicy,
+                                   POST /payments only, traced, circuit breaker)
+```
+
+Payment service is the most sensitive — it would benefit most from Istio's AuthorizationPolicy preventing any service other than order-service from calling it, and from mTLS ensuring even internal cluster traffic cannot be eavesdropped.
+
+**Canary deployment with Istio in AzureShop:**
+
+Today, to test product-service v2.0.0 on 10% of traffic, you would need to:
+- Deploy a separate Deployment with 1 replica (10% of 10 total = 10%)
+- This is imprecise and couples traffic split to replica count
+
+With Istio VirtualService:
+```yaml
+# Test v2.0.0 on exactly 10% regardless of replica count
+- route:
+    - destination: { host: product-service, subset: v1 }
+      weight: 90
+    - destination: { host: product-service, subset: v2 }
+      weight: 10
+```
+
+Run 5 v2 replicas and 5 v1 replicas, but only 10% of requests go to v2. This is true canary — traffic percentage is independent of replica count.
+
+**Why AzureShop doesn't use Istio today:**
+- AzureShop is a dev/learning environment — the operational overhead of Istio (more complexity, more memory per pod ~50MB per sidecar, more objects to manage) is not justified
+- At 8 services and low traffic, the benefits don't outweigh the costs
+- At enterprise scale (50+ services, strict compliance requirements, multiple teams), Istio is standard practice
+
+---
+
+### Popular Alternatives to Istio
+
+| Service Mesh | Key Trait | Best For |
+|---|---|---|
+| **Istio** | Most features, most complex, uses Envoy | Large enterprises, Google Cloud |
+| **Linkerd** | Lightweight, simple, Rust-based proxy | Teams that want simpler operations |
+| **Consul Connect** | HashiCorp ecosystem | Teams already using Vault/Consul |
+| **AWS App Mesh** | AWS-native, uses Envoy | AWS-only workloads |
+| **Cilium Service Mesh** | eBPF-based, no sidecar needed | High performance, newer clusters |
+| **Azure Service Fabric Mesh** | Azure-managed | Azure-native microservices |
+
+**Cilium** is particularly interesting for AKS: it uses eBPF (a Linux kernel technology) to do what Istio does, but without injecting sidecar containers. AKS has native Cilium integration and it is becoming increasingly popular as it eliminates the sidecar overhead entirely.
+
+---
+
+### The Sidecar Overhead — The Real Cost of a Service Mesh
+
+Nothing is free. Each Envoy sidecar adds:
+
+- **~50MB RAM** per pod (each AzureShop pod would go from ~128MB to ~178MB)
+- **~1-2ms latency** added per hop (two proxy hops: source Envoy + destination Envoy)
+- **More CPU** for TLS encryption/decryption
+- **More complexity** — new CRDs, more YAML, new failure modes to debug
+- **Startup time** — pods take slightly longer to start (sidecar must register with istiod)
+
+At 8 pods per service × 8 services = 64 pods, this adds ~3.2GB of extra RAM just for sidecars. For a dev cluster this is significant. For a production cluster with 200+ pods across 50 services, the security and observability benefits easily outweigh the cost.
+
+---
+
+### Summary: What Problem Each Istio Feature Solves
+
+```
+PROBLEM                          ISTIO SOLUTION
+─────────────────────────────    ──────────────────────────────────────
+Pod-to-pod traffic readable      mTLS (PeerAuthentication STRICT mode)
+by anyone on cluster network
+
+Any service can call any          AuthorizationPolicy — cryptographic
+other service                     identity-based access control (Layer 7)
+
+Cascading failures when           Circuit breaker (outlierDetection in
+one service is slow/down          DestinationRule) + retries + timeouts
+
+Can't trace a request across      Automatic distributed tracing
+multiple services                 (Jaeger/Zipkin via Envoy)
+
+No metrics without coding         Automatic Prometheus metrics from
+them into every service           every Envoy proxy
+
+Can only do random load           DestinationRule: LEAST_CONN,
+balancing (kube-proxy)            consistent-hash, round-robin
+
+Canary = replica count            VirtualService: precise weight %
+(coarse, imprecise)               independent of replica count
+
+Header-based routing impossible   VirtualService match conditions:
+                                  headers, URI, method, port
+
+External service traffic          ServiceEntry: bring external services
+unmanaged by mesh                 into the mesh's control
+```
+
+---
+
+### Interview Prep
+
+1. **What is a service mesh?** — A service mesh is an infrastructure layer that handles all service-to-service (east-west) communication inside a Kubernetes cluster. It uses sidecar proxy containers injected into every pod to intercept all network traffic. The application code never changes — the mesh handles encryption (mTLS), retries, timeouts, circuit breakers, traffic splitting, and observability automatically. It solves problems that would otherwise require each development team to implement the same networking logic repeatedly.
+
+2. **What is Istio?** — Istio is the most widely used open-source service mesh for Kubernetes. It uses Envoy as its sidecar proxy and has a control plane called istiod. istiod has three components: Pilot (distributes routing config to all proxies), Citadel (issues TLS certificates for every ServiceAccount), and Galley (validates config). Istio provides mTLS, traffic management, circuit breaking, distributed tracing, automatic metrics, and authorization policies.
+
+3. **What is the sidecar pattern?** — A sidecar is a second container injected into every pod alongside your application container. In Istio, this sidecar is an Envoy proxy. Every packet going in or out of the pod passes through the Envoy sidecar first. The sidecar intercepts traffic using iptables rules set by an init container at pod startup. The application sees nothing — it makes plain HTTP calls, and Envoy transparently handles encryption, routing policies, and telemetry. Istio injects sidecars automatically via a Mutating Admission Webhook when the namespace has `istio-injection: enabled`.
+
+4. **What is mutual TLS (mTLS)?** — mTLS is TLS where BOTH sides authenticate, not just the server. Normal HTTPS (one-way TLS): the browser verifies the server's certificate, but the server does not verify the browser. mTLS: both services verify each other's certificates before communicating. In Istio, every pod's Envoy sidecar gets a SPIFFE certificate tied to its Kubernetes ServiceAccount. When two services connect, both Envoy proxies exchange and verify certificates. This proves that "I am really payment-service/sa/order-service" — a compromised pod cannot impersonate another service.
+
+5. **What is a VirtualService in Istio?** — A VirtualService defines routing rules for traffic going TO a service. It answers: where does this request actually go? You can split traffic by percentage (90% to v1, 10% to v2 for canary), route by HTTP header (premium users to v2), set timeouts and retry rules, and inject faults for chaos testing. A VirtualService is bound to a specific host (service name) and applies to all traffic heading to that host.
+
+6. **What is a DestinationRule in Istio?** — A DestinationRule defines policies that apply AFTER routing is decided. It answers: how do we connect to the destination? It sets load balancing algorithm (LEAST_CONN, ROUND_ROBIN, RANDOM, consistent hash), circuit breaker settings (outlier detection, connection pool limits), and defines subsets (named groups of pods by label, e.g., v1 and v2). VirtualService and DestinationRule always work as a pair: VirtualService says where, DestinationRule says how.
+
+7. **What is a circuit breaker and why does Istio need one?** — A circuit breaker prevents cascading failures. If payment-service starts returning errors, without a circuit breaker, order-service keeps calling it and fills up its thread pool, eventually going down itself — taking down the whole platform. Istio's circuit breaker (configured via DestinationRule outlierDetection) watches error rates per pod. If a pod returns 5 consecutive errors, Istio stops routing to it for 30 seconds. Traffic goes to healthy pods only. After the cooldown, Istio sends one probe request to check if the pod recovered. This stops one failing service from cascading into a full outage.
+
+8. **What does AzureShop gain from using Istio vs what it does today?** — Today AzureShop uses plain Kubernetes: inter-service traffic is unencrypted HTTP, any service can call any other service, there is no distributed tracing, and kube-proxy does only random load balancing. With Istio: all 8 services communicate via mTLS (encrypted, identity-verified), payment-service would be locked to only accept calls from order-service via AuthorizationPolicy, every request across all 6 hops is automatically traced in Jaeger with per-hop latency, and canary deployments become precise percentage splits. The trade-off is ~50MB RAM per pod overhead and increased operational complexity — justified at enterprise scale but overkill for a dev learning environment.
