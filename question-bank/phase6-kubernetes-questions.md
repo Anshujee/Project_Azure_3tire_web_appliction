@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern.
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels).
 
 ---
 
@@ -30,6 +30,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 21. [What is a Kubernetes Controller? How are Default Controllers Different from Managed Kubernetes Controllers?](#q21-what-is-a-kubernetes-controller-how-are-default-controllers-different-from-managed-kubernetes-controllers)
 22. [What is a Kubernetes Service? Full Working, Types, and How AzureShop Uses It?](#q22-what-is-a-kubernetes-service-full-working-types-and-how-azureshop-uses-it)
 23. [What is the Role of kube-proxy in Kubernetes?](#q23-what-is-the-role-of-kube-proxy-in-kubernetes)
+24. [What are Labels and Selectors in Kubernetes? How are They Different and How Does AzureShop Use Them?](#q24-what-are-labels-and-selectors-in-kubernetes-how-are-they-different-and-how-does-azureshop-use-them)
 
 ---
 
@@ -3207,3 +3208,521 @@ AKS supports Cilium as an optional CNI. For AzureShop's scale (8 services, dev c
 6. **What happens in kube-proxy when a pod crashes?** — The pod fails its readiness probe → EndpointSlice Controller removes that pod's IP from the EndpointSlice → API Server streams the change to all kube-proxy instances → kube-proxy on every node updates its iptables rules to remove that pod IP → no new packets are routed to the dead pod. This happens within 1-2 seconds.
 7. **Does kube-proxy do load balancing?** — Yes, basic load balancing. In iptables mode it uses probability rules — each pod gets an equal random chance of receiving the next packet. It does NOT do latency-aware, connection-count-aware, or true round-robin balancing. For that, a service mesh (Istio/Linkerd with Envoy sidecar) is needed.
 8. **In AzureShop, when does kube-proxy update its rules?** — Every time a Helm deployment changes the running pods: old pods terminate, new pods start → EndpointSlice is updated → kube-proxy on all 4 nodes (2 system + 2 user) updates iptables rules → traffic silently shifts from old pod IPs to new pod IPs. The ClusterIP, DNS name, and nginx.conf never change.
+
+---
+
+## Q24. What are Labels and Selectors in Kubernetes? How are They Different and How Does AzureShop Use Them?
+
+### The Core Problem Labels and Selectors Solve
+
+In Kubernetes, you have many objects: dozens of pods, multiple Services, Deployments, HPAs, NetworkPolicies. Kubernetes needs a way to say: **"this Service belongs to these pods"**, **"this HPA controls this Deployment"**, **"this NetworkPolicy applies to these pods"**.
+
+Without labels, Kubernetes would have no way to connect objects to each other. It cannot use pod names (they contain random suffixes like `-7d4f9b-xk2p9` that change every restart). It cannot use IP addresses (those change too). Labels are the answer.
+
+Think of it like a **luggage tag** at an airport. You write your name on a tag and attach it to your bag. The baggage carousel attendant reads the tag and sends it to the right passenger. Labels are the tags; selectors are how Kubernetes reads and matches those tags.
+
+---
+
+### What is a Label?
+
+A label is a **key-value pair** that you attach to any Kubernetes object (Pod, Deployment, Service, Node, Namespace, etc.). It is just metadata — it does not change how the object behaves on its own. Labels only matter when something else **reads them using a selector**.
+
+```yaml
+metadata:
+  labels:
+    app: user-service        # key=app, value=user-service
+    env: production          # key=env, value=production
+    version: v1.0.0          # key=version, value=v1.0.0
+```
+
+Labels are:
+- **Arbitrary** — you invent any key-value pairs you want
+- **Multiple** — one object can have many labels
+- **Mutable** — you can add, remove, or change labels without restarting the object
+- **Not unique** — many objects can share the same label (that is the point — a selector finds all of them)
+
+---
+
+### What is a Selector?
+
+A selector is a **query or filter** that an object uses to find other objects by their labels. A selector says: "give me all objects that have label `app=user-service`."
+
+There are two types of selectors in Kubernetes:
+
+#### 1. Equality-Based Selector (`matchLabels`)
+
+The simplest form. It says: label key must equal this value.
+
+```yaml
+selector:
+  matchLabels:
+    app: user-service       # find pods where app == user-service
+```
+
+This is what you see in almost every Deployment and Service. It finds all pods where `app` equals `user-service`.
+
+#### 2. Set-Based Selector (`matchExpressions`)
+
+More powerful. Supports `In`, `NotIn`, `Exists`, `DoesNotExist` operators.
+
+```yaml
+selector:
+  matchExpressions:
+    - key: env
+      operator: In
+      values: [production, staging]   # env must be either production or staging
+    - key: tier
+      operator: NotIn
+      values: [cache]                 # tier must NOT be cache
+    - key: critical
+      operator: Exists               # label critical must exist (any value)
+```
+
+`matchLabels` and `matchExpressions` can be combined — both must match simultaneously (logical AND).
+
+---
+
+### Labels vs Selectors — The Key Difference
+
+| Concept | What it is | Where it lives | Who uses it |
+|---|---|---|---|
+| **Label** | A key-value tag attached TO an object | On the object itself (Pod, Deployment, etc.) | Passive — just sits there |
+| **Selector** | A query that finds objects BY their labels | On the object that wants to find others | Active — searches for matching labels |
+
+Labels are like price tags on products. A selector is like a shopping filter ("show me all red items under $20"). The product doesn't know it's being filtered; the filter just reads the tags.
+
+---
+
+### How Labels Wire Objects Together
+
+The most important use of labels and selectors in day-to-day Kubernetes is the **Deployment → Service wiring**. Here is exactly how it works:
+
+#### Step 1: Deployment creates pods with labels
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+spec:
+  selector:
+    matchLabels:
+      app: user-service          # Deployment manages pods that have this label
+  template:                      # pod template — every pod gets these labels
+    metadata:
+      labels:
+        app: user-service        # ← label stamped on every pod
+        version: v1.0.0
+    spec:
+      containers:
+        - name: user-service
+          image: acrazureshopdev.azurecr.io/user-service:v1.0.0
+```
+
+Every pod the Deployment creates gets labels `app=user-service` and `version=v1.0.0` stamped on it automatically.
+
+#### Step 2: Service finds pods using a selector
+
+```yaml
+apiVersion: v1
+kind: Service
+spec:
+  selector:
+    app: user-service            # ← find all pods where app == user-service
+  ports:
+    - port: 3001
+      targetPort: 3001
+```
+
+The Service does NOT reference the Deployment by name. It does NOT reference pod names. It finds pods purely by reading their labels. Any pod on any node with label `app=user-service` will be added to this Service's endpoint list.
+
+#### Why This is Powerful
+
+```
+BEFORE update:
+  pod-v1-abc (app=user-service, version=v1.0.0) ← included in Service
+  pod-v1-def (app=user-service, version=v1.0.0) ← included in Service
+
+DURING rolling update:
+  pod-v1-abc (app=user-service, version=v1.0.0) ← still included
+  pod-v2-xyz (app=user-service, version=v2.0.0) ← automatically included (same app label!)
+
+AFTER update completes:
+  pod-v2-xyz (app=user-service, version=v2.0.0) ← included
+  pod-v2-pqr (app=user-service, version=v2.0.0) ← included
+```
+
+The Service always routes to whatever pods match its selector — whether those pods are old, new, or a mix during an update. Zero downtime rolling updates work because labels remain consistent across versions.
+
+---
+
+### The Deployment's Own Selector vs the Pod Template's Labels
+
+A Deployment has TWO separate label sections, and beginners often confuse them:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+  labels:                        # ← labels ON THE DEPLOYMENT OBJECT ITSELF
+    app: user-service            #    used by nothing critical; just for kubectl filtering
+spec:
+  selector:
+    matchLabels:
+      app: user-service          # ← what pods this Deployment manages (IMMUTABLE after creation)
+  template:
+    metadata:
+      labels:
+        app: user-service        # ← labels stamped on PODS created by this Deployment
+        version: v1.0.0          #    must be a superset of spec.selector.matchLabels
+```
+
+**Critical rule:** `spec.selector.matchLabels` must be a **subset** of `spec.template.metadata.labels`. If the selector asks for `app=user-service`, every pod template must have `app=user-service`. If they don't match, Kubernetes rejects the Deployment at creation time.
+
+**Also critical:** `spec.selector` is **immutable** — you cannot change the Deployment's selector labels after it is created. You have to delete and recreate the Deployment if you need to change selectors. This is because changing the selector would cause the Deployment to "orphan" its existing pods (they no longer match) and create a new set — which is dangerous and usually a mistake.
+
+---
+
+### Labels in AzureShop — How the Helm Template Works
+
+In AzureShop, all Kubernetes objects are generated from Helm templates. Let's trace exactly how labels flow through the system.
+
+#### The Helm helper template — `_helpers.tpl`
+
+The shared library chart defines reusable label snippets:
+
+```
+helm/charts/user-service/templates/_helpers.tpl
+```
+
+This file (generated by `helm create`) defines two key functions:
+
+```go
+{{- define "azureshop.labels" -}}
+helm.sh/chart: {{ include "azureshop.chart" . }}
+{{ include "azureshop.selectorLabels" . }}
+app.kubernetes.io/version: {{ .Values.image.tag | quote }}
+app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{- define "azureshop.selectorLabels" -}}
+app.kubernetes.io/name: {{ include "azureshop.name" . }}
+app.kubernetes.io/instance: {{ .Release.Name }}
+{{- end }}
+```
+
+There are **two separate label sets** used for different purposes:
+
+| Helper | Labels it produces | Used where |
+|---|---|---|
+| `azureshop.labels` | 4 labels: chart name, version, service name, instance, managed-by | Deployment metadata, Service metadata — all objects for `kubectl get` filtering |
+| `azureshop.selectorLabels` | 2 labels: service name + release instance | `spec.selector.matchLabels` and pod template labels — the ones that wire Service to pods |
+
+The `selectorLabels` are kept minimal (only 2) because they are **immutable** once the Deployment is created. `version` is NOT in selectorLabels — if it were, a version bump would create a new Deployment with a different selector, orphaning all existing pods.
+
+#### The Deployment template
+
+```
+helm/charts/user-service/templates/deployment.yaml
+```
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "azureshop.name" . }}        # e.g. "user-service"
+  labels:
+    {{- include "azureshop.labels" . | nindent 4 }}   # all 4 labels on the Deployment object
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "azureshop.selectorLabels" . | nindent 6 }}  # 2 selector labels (immutable)
+  template:
+    metadata:
+      labels:
+        {{- include "azureshop.labels" . | nindent 8 }}         # all 4 labels on pods
+```
+
+For user-service, this renders to:
+
+```yaml
+# On the Deployment object:
+labels:
+  helm.sh/chart: user-service-0.1.0
+  app.kubernetes.io/name: user-service
+  app.kubernetes.io/instance: user-service
+  app.kubernetes.io/version: "v1.0.0"
+  app.kubernetes.io/managed-by: Helm
+
+# Deployment's selector (immutable):
+selector:
+  matchLabels:
+    app.kubernetes.io/name: user-service
+    app.kubernetes.io/instance: user-service
+
+# Labels on pods:
+labels:
+  helm.sh/chart: user-service-0.1.0
+  app.kubernetes.io/name: user-service
+  app.kubernetes.io/instance: user-service
+  app.kubernetes.io/version: "v1.0.0"
+  app.kubernetes.io/managed-by: Helm
+```
+
+#### The Service template
+
+```
+helm/charts/user-service/templates/service.yaml
+```
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "azureshop.name" . }}        # "user-service"
+  labels:
+    {{- include "azureshop.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "azureshop.selectorLabels" . | nindent 4 }}  # matches pods by same 2 labels
+  ports:
+    - port: {{ .Values.service.port }}           # 3001
+      targetPort: {{ .Values.service.targetPort }}
+```
+
+The Service uses `selectorLabels` — the same 2 labels as the Deployment's `spec.selector.matchLabels`. This guarantees the Service always selects exactly the pods managed by this Deployment.
+
+#### The HPA template
+
+```
+helm/charts/user-service/templates/hpa.yaml
+```
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: {{ include "azureshop.name" . }}
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: {{ include "azureshop.name" . }}       # ← HPA references Deployment by NAME, not labels
+```
+
+The HPA is an exception — it finds the Deployment by name, not by selector. Labels are not used for HPA → Deployment wiring.
+
+---
+
+### All 8 AzureShop Services — Their Labels
+
+Each of the 8 services generates the same label structure from the shared Helm helper template. Only the values differ:
+
+| Service | `app.kubernetes.io/name` | `app.kubernetes.io/instance` | Port |
+|---|---|---|---|
+| api-gateway | `api-gateway` | `api-gateway` | 8080 |
+| user-service | `user-service` | `user-service` | 3001 |
+| product-service | `product-service` | `product-service` | 3002 |
+| cart-service | `cart-service` | `cart-service` | 3003 |
+| order-service | `order-service` | `order-service` | 3004 |
+| payment-service | `payment-service` | `payment-service` | 3005 |
+| frontend | `frontend` | `frontend` | 3000 |
+| notification-service | `notification-service` | `notification-service` | 3006 |
+
+Each service's Service object selects pods with the matching `app.kubernetes.io/name`. There is zero cross-talk — `app.kubernetes.io/name: user-service` only matches user-service pods, never product-service pods.
+
+---
+
+### Labels for kubectl Filtering — Not Just Wiring
+
+Labels also serve a pure operational purpose: filtering output of `kubectl` commands.
+
+```bash
+# Get only user-service pods
+kubectl get pods -l app.kubernetes.io/name=user-service -n azureshop
+
+# Get all pods managed by Helm
+kubectl get pods -l app.kubernetes.io/managed-by=Helm -n azureshop
+
+# Get all pods for a specific Helm release
+kubectl get pods -l app.kubernetes.io/instance=user-service -n azureshop
+
+# Delete all pods for a specific service (they will be recreated by Deployment)
+kubectl delete pods -l app.kubernetes.io/name=cart-service -n azureshop
+```
+
+This is why `helm.sh/chart` and `app.kubernetes.io/managed-by` are included in `azureshop.labels` but NOT in `azureshop.selectorLabels` — they are for human filtering, not for Service → pod wiring.
+
+---
+
+### Labels on Nodes — A Different Use Case
+
+Labels are not just for pods. Nodes can have labels too, and they are used to **control where pods are scheduled**.
+
+In AzureShop the AKS cluster has two node pools:
+- `system` node pool: labeled `agentpool=system`, `kubernetes.azure.com/mode=system`
+- `user` node pool: labeled `agentpool=user`, `kubernetes.azure.com/mode=user`
+
+The system node pool has a `CriticalAddonsOnly` taint, which repels application pods. Application pods are scheduled on user pool nodes. This is how AKS ensures kube-system components (CoreDNS, metrics-server) never compete for resources with your app pods.
+
+Pod spec can use `nodeSelector` to require a specific node label:
+
+```yaml
+spec:
+  nodeSelector:
+    agentpool: user               # only schedule on the user node pool
+```
+
+Or the more powerful `nodeAffinity`:
+
+```yaml
+spec:
+  affinity:
+    nodeAffinity:
+      requiredDuringSchedulingIgnoredDuringExecution:
+        nodeSelectorTerms:
+          - matchExpressions:
+              - key: kubernetes.azure.com/mode
+                operator: In
+                values: [user]
+```
+
+AzureShop's Helm charts do not currently specify nodeSelector because the `CriticalAddonsOnly` taint on the system pool naturally prevents app pods from landing there.
+
+---
+
+### NetworkPolicy and Labels
+
+Labels are also how NetworkPolicies identify which pods to allow or block. In AzureShop's zero-trust NetworkPolicy setup:
+
+```yaml
+# Allow product-service to receive traffic only from api-gateway
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-api-gateway-to-product-service
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: product-service   # THIS policy applies to product-service pods
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: api-gateway  # ONLY allow traffic from api-gateway pods
+```
+
+The NetworkPolicy does not reference service names or IP addresses. It works entirely through labels — which pods this policy covers (`podSelector`) and which pods are allowed as sources (`ingress.from.podSelector`).
+
+---
+
+### Are Labels the Same Across All Deployments?
+
+**The label keys are the same. The values differ per service.** This is intentional:
+
+- `app.kubernetes.io/name` — same key, different value per service (`user-service`, `product-service`, etc.)
+- `app.kubernetes.io/instance` — in AzureShop this matches the service name (could differ if two instances of the same chart were deployed)
+- `helm.sh/chart` — same key, includes the chart version (could differ if charts have different versions)
+- `app.kubernetes.io/managed-by` — always `Helm` across all services (same key AND value)
+
+So labels are not identical — they are structurally the same (same keys), but the values distinguish one service from another. That is what makes selectors work: each Service's selector matches ONLY its own pods because the `app.kubernetes.io/name` value is unique per service.
+
+---
+
+### Common Mistakes With Labels and Selectors
+
+**Mistake 1: Typo in selector label**
+
+```yaml
+# Deployment labels pods with:
+labels:
+  app: user-service
+
+# Service selector has a typo:
+selector:
+  app: user_service    # underscore instead of hyphen!
+```
+
+Result: The Service finds zero pods. `kubectl get endpoints user-service` shows `<none>`. Traffic hits the ClusterIP but gets no response (connection refused). This is one of the most common misconfigurations in Kubernetes.
+
+**Mistake 2: Forgetting that Deployment selector is immutable**
+
+```yaml
+# Original deployment
+spec:
+  selector:
+    matchLabels:
+      app: user-service
+
+# You try to change it to:
+spec:
+  selector:
+    matchLabels:
+      app: user-service
+      env: production    # added a new label
+```
+
+Result: `kubectl apply` fails with: `field is immutable`. You must delete and recreate the Deployment (causing brief downtime unless you use a strategy like Blue/Green).
+
+**Mistake 3: Selector too broad**
+
+```yaml
+# HPA configured to select pods with:
+selector:
+  matchLabels:
+    env: production      # matches ALL production pods across ALL services!
+```
+
+Result: The HPA would scale all services together. Always use the specific `app.kubernetes.io/name` label in selectors.
+
+**Mistake 4: Version in selector**
+
+```yaml
+selector:
+  matchLabels:
+    app: user-service
+    version: v1.0.0     # version in selector = bad idea
+```
+
+Result: When you deploy `v2.0.0`, the new pods have `version=v2.0.0` but the Service selector still says `v1.0.0`. The Service routes zero traffic to the new pods. Zero downtime update is broken. Never put version in selector labels.
+
+---
+
+### Quick Reference: Label vs Selector at a Glance
+
+```
+LABEL (on the pod)               SELECTOR (on the Service/Deployment/HPA)
+─────────────────────────────    ──────────────────────────────────────────
+Attached TO the object           Queries objects by their labels
+Passive metadata                 Active filter
+Can have many labels             Selector must match label values exactly
+Anyone can read them             Used by: Services, Deployments, HPAs,
+                                 NetworkPolicies, nodeAffinity, kubectl -l
+
+Direction:
+  Pod has labels ──→ Service selector reads those labels ──→ Service routes to pod
+  Pod has labels ──→ Deployment selector owns those pods ──→ Deployment manages pod lifecycle
+  Pod has labels ──→ NetworkPolicy selector applies rules ──→ Traffic allowed/denied
+  Node has labels ──→ nodeAffinity selector reads them ──→ Pod scheduled on node
+```
+
+---
+
+### Interview Prep
+
+1. **What is a label in Kubernetes?** — A label is a key-value pair attached to any Kubernetes object as metadata. Labels do nothing on their own — they are just tags. They become powerful when selectors query them. Labels are used to group objects (all user-service pods have `app=user-service`) so that other objects (Services, HPAs, NetworkPolicies) can find and operate on them.
+
+2. **What is a selector in Kubernetes?** — A selector is a query that finds Kubernetes objects by their labels. A Service with `selector: app=user-service` finds every pod with that label and routes traffic to them. Selectors are how Services discover pods, how Deployments own pods, and how NetworkPolicies apply to pods.
+
+3. **What is the difference between labels and selectors?** — Labels are attached TO objects and are passive. Selectors are used BY objects to actively find other objects. A pod has labels; a Service has a selector that reads those labels. You write labels on pods; you write selectors on Services. The selector is the query; the label is the data it queries.
+
+4. **Why is `spec.selector` in a Deployment immutable?** — Because the selector defines which pods the Deployment "owns." If you changed the selector after creation, the Deployment would stop managing its existing pods (they no longer match the new selector) and start creating new pods. The old pods would become orphans — running forever with nothing managing them. Kubernetes prevents this by making the selector immutable. If you need a different selector, delete and recreate the Deployment.
+
+5. **Why should version labels NOT be in a Deployment's selector?** — Because the selector is immutable. Every time you deploy a new version, the pod template gets a new `version=v2.0.0` label, but the selector still says `version=v1.0.0`. No pods match — the Deployment cannot manage its own pods. Kubernetes would reject this. Use version labels in the pod template only, not in the selector.
+
+6. **In AzureShop, how does the Service know which pods to route to?** — The Service uses `selectorLabels` from the Helm `_helpers.tpl`, which resolves to `app.kubernetes.io/name: user-service` and `app.kubernetes.io/instance: user-service`. The Deployment stamps these exact same two labels onto every pod in its template. The Service reads those labels and adds matching pods to its EndpointSlice. No manual pod-to-service wiring is needed.
+
+7. **What is `matchLabels` vs `matchExpressions`?** — `matchLabels` is a simple equality check: label key must equal this value. `matchExpressions` supports operators: `In` (value must be one of), `NotIn` (value must not be one of), `Exists` (label must be present regardless of value), `DoesNotExist` (label must be absent). Both can be combined — all conditions must pass (logical AND). `matchLabels` is sufficient for most use cases; `matchExpressions` is used when you need more complex filtering like "apply this NetworkPolicy to all services except the cache tier."
+
+8. **How would you troubleshoot a Service that has no endpoints?** — Run `kubectl get endpoints <service-name> -n <namespace>`. If it shows `<none>`, the Service selector is not matching any pods. Then run `kubectl get pods -n <namespace> --show-labels` and compare the pod labels against the Service selector. Look for typos (hyphen vs underscore), missing labels, or wrong values. A mismatch here is the most common cause of "connection refused" errors in Kubernetes.
