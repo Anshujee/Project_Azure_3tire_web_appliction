@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File).
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File), Kubernetes Ingress (Ingress resource vs Ingress Controller, NGINX Ingress, path-based routing, TLS termination, canary deployments, how AzureShop routes traffic through Application Gateway → NGINX → api-gateway → services).
 
 ---
 
@@ -35,6 +35,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 26. [What is a Service Mesh? What is Istio, How Does it Work, and What Problems Does it Solve in Kubernetes?](#q26-what-is-a-service-mesh-what-is-istio-how-does-it-work-and-what-problems-does-it-solve-in-kubernetes)
 27. [How Does Autoscaling Work in Kubernetes? Explain HPA, VPA, Cluster Autoscaler, and KEDA with How Services Fit In](#q27-how-does-autoscaling-work-in-kubernetes-explain-hpa-vpa-cluster-autoscaler-and-keda-with-how-services-fit-in)
 28. [What is a Persistent Volume and a Persistent Volume Claim in Kubernetes?](#q28-what-is-a-persistent-volume-and-a-persistent-volume-claim-in-kubernetes)
+29. [What is Kubernetes Ingress? How Does it Work, and How is it Used in AzureShop?](#q29-what-is-kubernetes-ingress-how-does-it-work-and-how-is-it-used-in-azureshop)
 
 ---
 
@@ -6066,3 +6067,558 @@ Similar to the Cluster Autoscaler's `node_count`, if Terraform manages a Statefu
 7. **Why do AzureShop's application services (user-service, etc.) use emptyDir instead of PVCs?** — Because application services are stateless — all durable state (user records, orders, products) is stored in Azure SQL, which is external to Kubernetes. The `/tmp` directory used by Node.js is purely for temporary processing — files that are meaningless after the request completes. Using a PVC for `/tmp` would cost money, add zone-pinning constraints (the pod must always run on a node in the same zone as its Azure Disk), and provide zero benefit since the data is intentionally throwaway. Only stateful workloads need PVCs.
 
 8. **What is a StatefulSet and when do you use it with PVCs?** — A StatefulSet is a Kubernetes controller for stateful applications that need stable identity and dedicated storage. Unlike Deployments (where pods are interchangeable), StatefulSet pods have predictable names (`postgres-0`, `postgres-1`) and each get their own PVC via `volumeClaimTemplates`. When a StatefulSet pod is replaced, the new pod gets the same name and mounts the same PVC — preserving all its data. Use StatefulSet when running databases or other stateful apps inside Kubernetes. AzureShop uses Azure SQL instead of a Kubernetes StatefulSet for its database — managed cloud databases are simpler and more reliable than managing a database StatefulSet yourself.
+
+---
+
+## Q29. What is Kubernetes Ingress? How Does it Work, and How is it Used in AzureShop?
+
+### The Problem Ingress Solves
+
+Before Ingress existed, there were two ways to expose a Kubernetes service to the outside world:
+
+**Option 1 — NodePort:** Expose the service on a port of every node (e.g., port 30001). The caller hits `node-ip:30001`. Problems: you must know node IPs, nodes are ephemeral, ports clash between services, and you must manage firewall rules per port.
+
+**Option 2 — LoadBalancer Service:** Each service gets its own Azure Load Balancer with its own public IP address.
+
+```
+user-service    → Azure Load Balancer #1 → public IP: 20.1.1.1
+product-service → Azure Load Balancer #2 → public IP: 20.1.1.2
+cart-service    → Azure Load Balancer #3 → public IP: 20.1.1.3
+order-service   → Azure Load Balancer #4 → public IP: 20.1.1.4
+payment-service → Azure Load Balancer #5 → public IP: 20.1.1.5
+frontend        → Azure Load Balancer #6 → public IP: 20.1.1.6
+```
+
+For AzureShop's 8 services this means **8 public IP addresses** and **8 Azure Load Balancers** — each load balancer costs money, and managing 8 separate IPs for one application is a nightmare.
+
+**The Ingress solution:** One load balancer, one public IP, smart HTTP routing rules that send traffic to the right backend service based on the URL path or hostname.
+
+```
+Internet
+    ↓
+48.202.215.133  (ONE public IP — shared by all 8 services)
+    ↓
+NGINX Ingress Controller
+    ↓ routes by URL path
+/api/*  → api-gateway:8080  (which then routes to individual microservices)
+/       → frontend:3000
+```
+
+---
+
+### Two Separate Concepts: Ingress Resource vs Ingress Controller
+
+This is the most important distinction to understand about Ingress. Many beginners confuse the two — they are completely different things.
+
+#### Ingress Resource
+
+An Ingress resource is a **Kubernetes object** — just a YAML file that defines routing rules. It says "requests to path `/api/` should go to service `api-gateway` on port `8080`." By itself, an Ingress resource does absolutely nothing. It is just configuration data stored in the Kubernetes API.
+
+Think of it like a **restaurant menu**. The menu lists all the dishes. But the menu itself does not cook anything — you still need a kitchen (the controller) to actually make the food.
+
+#### Ingress Controller
+
+An Ingress Controller is the **actual software** that reads the Ingress resource and implements the routing rules. It is a running pod (or set of pods) in your cluster that:
+1. Watches the Kubernetes API for Ingress resource changes
+2. Translates those routing rules into its own config (e.g., NGINX config)
+3. Receives real network traffic and routes it to the right backend services
+
+Kubernetes does NOT ship with a built-in Ingress Controller. You must install one yourself. There are many options:
+
+| Ingress Controller | Made by | Notes |
+|---|---|---|
+| **NGINX Ingress Controller** | Kubernetes community | Most popular, feature-rich, what AzureShop uses |
+| **Azure Application Gateway Ingress Controller (AGIC)** | Microsoft | Native AKS integration, uses Azure App Gateway |
+| **Traefik** | Traefik Labs | Cloud-native, auto-discovers services |
+| **HAProxy Ingress** | HAProxy Technologies | High performance |
+| **Istio Gateway** | Istio | Service mesh gateway |
+| **Kong** | Kong Inc. | API Gateway features built in |
+
+**In AzureShop:** NGINX Ingress Controller is installed in the `ingress-nginx` namespace. It is exposed via an Azure Load Balancer Service of type `LoadBalancer` which gets the external IP `48.202.215.133`.
+
+---
+
+### The Ingress Resource — Anatomy
+
+```yaml
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: azureshop-ingress
+  namespace: dev
+  annotations:                                    # ← controller-specific config
+    kubernetes.io/ingress.class: "nginx"          # use the NGINX controller
+    nginx.ingress.kubernetes.io/use-regex: "true"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+spec:
+  ingressClassName: nginx                         # modern way to select controller
+  rules:
+    - http:                                       # no "host:" = matches ALL hostnames
+        paths:
+          - path: /api/
+            pathType: Prefix                      # /api/ matches /api/users, /api/products etc.
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080
+
+          - path: /
+            pathType: Prefix                      # / matches everything else
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000
+```
+
+**Key fields explained:**
+
+**`annotations`** — Extra configuration passed to the specific Ingress Controller. NGINX Ingress has 50+ annotations for fine-grained control (rate limiting, auth, rewrites, timeouts, CORS, etc.). These are NOT standard Kubernetes — they are NGINX-specific.
+
+**`ingressClassName`** — Tells Kubernetes which installed Ingress Controller should process this Ingress resource. You can have multiple controllers installed (e.g., NGINX for regular traffic, AGIC for a specific domain), and `ingressClassName` routes the Ingress to the right one.
+
+**`spec.rules[].http.paths[].pathType`** — Three options:
+- `Prefix` — matches the path and everything after it. `/api/` matches `/api/users/123`, `/api/products/`, etc.
+- `Exact` — must match exactly. `/api/health` only matches `/api/health`, not `/api/health/`
+- `ImplementationSpecific` — controller decides the matching behaviour
+
+**`spec.rules[].host`** — If specified, the rule only applies when the HTTP `Host` header matches. Omitting `host` (as AzureShop does) means the rule applies to ALL hostnames hitting this controller.
+
+---
+
+### Path Matching — How NGINX Decides Where to Route
+
+When a request arrives, NGINX evaluates paths **longest match first**:
+
+```
+Request: GET /api/products/123
+
+Ingress rules:
+  /api/   → api-gateway:8080   (length 5)
+  /       → frontend:3000      (length 1)
+
+Result: /api/ wins (longer match) → api-gateway:8080
+```
+
+```
+Request: GET /dashboard
+
+Ingress rules:
+  /api/   → api-gateway:8080
+  /       → frontend:3000
+
+Result: /api/ does NOT match. / matches → frontend:3000
+```
+
+This is why AzureShop's Ingress has only TWO rules:
+1. `/api/` — catches all API traffic and sends it to NGINX api-gateway
+2. `/` — catches everything else (frontend pages, static assets, favicon, etc.)
+
+The api-gateway then handles the second level of routing internally (its own `nginx.conf` splits `/api/users/` → user-service, `/api/products/` → product-service, etc.).
+
+---
+
+### TLS Termination — HTTPS with Ingress
+
+A real production Ingress also handles HTTPS. You store a TLS certificate as a Kubernetes Secret and reference it in the Ingress:
+
+```yaml
+spec:
+  tls:
+    - hosts:
+        - azureshop.example.com
+      secretName: azureshop-tls-secret   # Secret containing cert + key
+  rules:
+    - host: azureshop.example.com
+      http:
+        paths:
+          - path: /api/
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080
+```
+
+The Kubernetes Secret `azureshop-tls-secret` contains:
+```yaml
+apiVersion: v1
+kind: Secret
+type: kubernetes.io/tls
+data:
+  tls.crt: <base64 encoded certificate>
+  tls.key: <base64 encoded private key>
+```
+
+When a client connects via HTTPS, NGINX terminates the TLS (decrypts it), then forwards plain HTTP internally to the backend services. This is called **SSL termination at the ingress** — your backend services never see TLS, keeping them simpler.
+
+For AzureShop, TLS termination actually happens at the **Azure Application Gateway** (one layer before NGINX), not at the NGINX Ingress. The chain is:
+
+```
+Browser (HTTPS) → Azure Application Gateway (TLS termination) → NGINX Ingress (HTTP) → Services
+```
+
+---
+
+### How the NGINX Ingress Controller Works Internally
+
+When you `kubectl apply -f k8s/ingress/dev-ingress.yaml`, here is exactly what happens:
+
+```
+Step 1: kubectl sends the Ingress object to the Kubernetes API Server.
+        It is stored in etcd. At this point nothing has changed in the network.
+
+Step 2: The NGINX Ingress Controller (running as a pod in ingress-nginx namespace)
+        is watching the Kubernetes API for Ingress resource changes.
+        It detects the new Ingress object immediately.
+
+Step 3: The controller reads the Ingress rules and translates them into an
+        NGINX configuration file (nginx.conf) inside the NGINX process:
+
+        server {
+          listen 80;
+          location /api/ {
+            proxy_pass http://dev-api-gateway-8080;
+          }
+          location / {
+            proxy_pass http://dev-frontend-3000;
+          }
+        }
+
+Step 4: The controller does a hot reload of NGINX config — no downtime.
+        NGINX starts routing traffic according to the new rules.
+
+Step 5: Real traffic arrives at the NGINX pod's external IP (48.202.215.133).
+        NGINX reads the path, looks up the right upstream (api-gateway or frontend),
+        and proxies the request to the correct ClusterIP Service.
+
+Step 6: If you later change the Ingress (add a new path, change a backend),
+        the controller detects the change and regenerates nginx.conf automatically.
+        No manual NGINX restart needed.
+```
+
+The NGINX Ingress Controller is a long-running reconciliation loop — it watches Ingress objects and keeps NGINX config in sync with what the objects say. This is the same pattern as every other Kubernetes controller.
+
+---
+
+### Hostname-Based Routing — Multiple Sites, One IP
+
+In addition to path-based routing, Ingress also supports hostname-based routing — different domains go to different backends:
+
+```yaml
+spec:
+  rules:
+    - host: shop.example.com           # hostname-based rule
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: frontend
+                port:
+                  number: 3000
+
+    - host: admin.example.com          # different host, different backend
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: admin-frontend
+                port:
+                  number: 3001
+
+    - host: api.example.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: api-gateway
+                port:
+                  number: 8080
+```
+
+All three hostnames share the same single public IP. NGINX reads the HTTP `Host` header on each request and routes accordingly. This is the same concept as virtual hosting in classic web servers — one IP, many websites.
+
+---
+
+### Canary Deployments with NGINX Ingress — Exact AzureShop Implementation
+
+One of the most powerful NGINX Ingress features is native canary deployment support. AzureShop has a ready-to-use example:
+
+File: `k8s/ingress/canary-example.yaml`
+
+```yaml
+# STABLE ingress — 80% of traffic
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: user-service-stable
+  namespace: dev
+  annotations:
+    kubernetes.io/ingress.class: nginx
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /api/users
+            pathType: Prefix
+            backend:
+              service:
+                name: user-service          # current production version
+                port:
+                  number: 3001
+---
+# CANARY ingress — 20% of traffic (new version being tested)
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: user-service-canary
+  namespace: dev
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    nginx.ingress.kubernetes.io/canary: "true"      # marks this as canary
+    nginx.ingress.kubernetes.io/canary-weight: "20" # 20% of traffic goes here
+spec:
+  rules:
+    - http:
+        paths:
+          - path: /api/users
+            pathType: Prefix
+            backend:
+              service:
+                name: user-service-canary   # new version being tested
+                port:
+                  number: 3001
+```
+
+How this works:
+- NGINX sees two Ingress objects for the same path `/api/users`
+- One is marked as `canary: "true"` with `canary-weight: "20"`
+- NGINX randomly sends **20% of requests to user-service-canary** and **80% to user-service**
+- No load balancer config needed — NGINX handles the split internally
+
+Other canary strategies available:
+
+```yaml
+# Route by HTTP header — specific users get the canary
+nginx.ingress.kubernetes.io/canary-by-header: "X-Canary"
+nginx.ingress.kubernetes.io/canary-by-header-value: "always"
+# Requests with header "X-Canary: always" → canary
+
+# Route by cookie — users with a cookie get the canary
+nginx.ingress.kubernetes.io/canary-by-cookie: "canary_user"
+# Requests with cookie "canary_user=always" → canary
+```
+
+To promote canary to production: increase weight to 100, update the stable deployment's image tag, then remove the canary Ingress. To rollback: delete the canary Ingress — all traffic instantly falls back to stable.
+
+---
+
+### The Full AzureShop Traffic Flow — End to End
+
+Here is the complete path a request takes from a browser to user-service, with every hop labelled:
+
+```
+BROWSER
+  │
+  │  HTTPS  GET https://azureshop.example.com/api/users/profile
+  │
+  ↓
+AZURE APPLICATION GATEWAY (Layer 7 load balancer + WAF)
+  ├── Public IP: 48.202.215.133
+  ├── WAF inspection: OWASP 3.2 rules check for SQL injection, XSS, etc.
+  ├── TLS termination: decrypts HTTPS → forwards as HTTP internally
+  └── Backend pool: forwards to NGINX Ingress Controller IP
+  │
+  │  HTTP  GET /api/users/profile
+  │
+  ↓
+NGINX INGRESS CONTROLLER (pod in ingress-nginx namespace)
+  ├── Receives request on port 80 (from App Gateway)
+  ├── Reads: path = /api/users/profile
+  ├── Matches Ingress rule: /api/ → api-gateway:8080
+  └── Proxies to ClusterIP of api-gateway Service
+  │
+  │  HTTP  GET /api/users/profile
+  │
+  ↓
+API-GATEWAY (NGINX pod in dev namespace)
+  ├── api-gateway is itself an NGINX container with its own nginx.conf
+  ├── Reads: path = /api/users/profile
+  ├── Matches: location /api/users/ → upstream user_service
+  └── Strips /api/users prefix → proxies to user-service:3001 with path /users/profile
+  │
+  │  HTTP  GET /users/profile
+  │
+  ↓
+USER-SERVICE (Node.js pod in dev namespace)
+  ├── Handles the request
+  ├── Queries Azure SQL Database
+  └── Returns JSON response
+  │
+  │  200 OK  {"id": 123, "name": "Anshu", ...}
+  │
+  ↑ (response travels back through the same chain in reverse)
+```
+
+**Why two layers of NGINX?**
+- **App Gateway** (Azure-managed): handles internet-facing concerns — WAF protection, TLS termination, DDoS protection, Azure integration
+- **NGINX Ingress** (Kubernetes-managed): handles Kubernetes routing concerns — path-based routing to services, canary deployments, rate limiting, Kubernetes-native
+- **api-gateway NGINX** (your own): handles microservice routing — strips path prefixes, adds headers, per-service rate limits, auth route handling
+
+Each layer has a clear, separate responsibility.
+
+---
+
+### File Locations in AzureShop
+
+```
+AzureShop/
+  k8s/
+    ingress/
+      dev-ingress.yaml          ← the Ingress resource (routing rules)
+      canary-example.yaml       ← canary deployment pattern with comments
+    ingress-nginx-values.yaml   ← NGINX Ingress Controller Helm values
+                                   (2 replicas, anti-affinity, resource limits, metrics)
+
+  infra/
+    modules/
+      appgateway/
+        main.tf                 ← Azure Application Gateway (WAF v2, TLS, backend pool)
+        variables.tf            ← AppGW config variables
+
+  helm/
+    charts/
+      <service>/
+        templates/
+          networkpolicy.yaml    ← allows ingress traffic from ingress-nginx namespace
+                                   allows inter-service traffic within same namespace
+
+  services/
+    api-gateway/
+      nginx.conf                ← api-gateway's own NGINX config (second routing layer)
+                                   routes /api/users/ → user-service:3001, etc.
+```
+
+The NGINX Ingress Controller itself is NOT in the repo as YAML — it was installed via Helm:
+```bash
+helm install nginx-ingress ingress-nginx/ingress-nginx \
+  --namespace ingress-nginx --create-namespace \
+  -f k8s/ingress-nginx-values.yaml
+```
+
+Only the **values file** (`k8s/ingress-nginx-values.yaml`) is in the repo — the actual controller runs inside the cluster, managed by Helm.
+
+---
+
+### NGINX Ingress Controller Configuration — AzureShop Values
+
+File: `k8s/ingress-nginx-values.yaml`
+
+```yaml
+controller:
+  replicaCount: 2              # two NGINX pods — High Availability
+
+  service:
+    annotations:
+      # Azure Load Balancer health check path
+      service.beta.kubernetes.io/azure-load-balancer-health-probe-request-path: /healthz
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 90Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+  podAntiAffinity:             # spread the 2 NGINX pods across different nodes
+    preferredDuringSchedulingIgnoredDuringExecution:
+      - weight: 100
+        podAffinityTerm:
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: ingress-nginx
+          topologyKey: kubernetes.io/hostname   # "prefer different hostnames = different nodes"
+
+  metrics:
+    enabled: true              # expose Prometheus metrics from NGINX
+
+defaultBackend:
+  enabled: true                # returns 404 for requests that match no Ingress rule
+```
+
+**`replicaCount: 2`** — Two NGINX pods means if one crashes or its node goes down, the other still routes traffic. Both pods are behind the Azure Load Balancer, so traffic spreads between them.
+
+**`podAntiAffinity`** — Tells the Kubernetes scheduler to prefer placing the two NGINX pods on **different nodes**. If both landed on the same node and that node went down, you would lose all ingress traffic. Anti-affinity ensures they spread across nodes.
+
+**`defaultBackend`** — A simple pod that returns HTTP 404 (and optionally a custom error page) for any request that does not match any Ingress rule. Without it, NGINX returns a generic "No backend" error.
+
+---
+
+### NetworkPolicy — How Ingress Traffic is Allowed Into Services
+
+Because AzureShop uses zero-trust NetworkPolicy (`policyTypes: Ingress`), all incoming traffic to each service pod is blocked by default. The NetworkPolicy on each service explicitly allows traffic from the NGINX Ingress Controller's namespace:
+
+File: `helm/charts/user-service/templates/networkpolicy.yaml`
+
+```yaml
+ingress:
+  # Allow inbound traffic from the NGINX ingress controller
+  - from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: ingress-nginx   # ← ingress-nginx namespace
+
+  # Allow inbound traffic from other pods in the same namespace
+  - from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: dev             # ← same namespace (api-gateway → user-service)
+```
+
+Without the first rule, the NGINX pod (in `ingress-nginx` namespace) would not be able to reach user-service pods (in `dev` namespace) — the NetworkPolicy would drop the packets silently. This is why the namespace label `kubernetes.io/metadata.name: ingress-nginx` must match the actual namespace name of your NGINX controller.
+
+---
+
+### Ingress vs Service LoadBalancer — Quick Comparison
+
+| | Service type=LoadBalancer | Kubernetes Ingress |
+|---|---|---|
+| **What it is** | One Azure LB per Service | One Azure LB for all Services |
+| **Public IPs** | One per service | One shared for all |
+| **Routing** | No routing — all traffic to one service | Path/host-based routing to multiple services |
+| **HTTP features** | None | TLS termination, rewrites, rate limiting, canary |
+| **Cost** | High (8 LBs for 8 services) | Low (1 LB for everything) |
+| **Use case** | Non-HTTP protocols (TCP/UDP), single service | HTTP/HTTPS routing to multiple services |
+| **AzureShop** | Used only for NGINX Ingress Controller itself | Used for all 8 services |
+
+The one service that uses `type: LoadBalancer` in AzureShop is the NGINX Ingress Controller itself — it needs a real public IP to receive traffic from the internet. All application services use `type: ClusterIP` and are reached through the Ingress.
+
+---
+
+### Interview Prep
+
+1. **What is a Kubernetes Ingress?** — An Ingress is a Kubernetes API object that defines HTTP routing rules — which URL paths or hostnames should route to which Services. By itself it does nothing; it is just config stored in Kubernetes. An Ingress Controller (like NGINX) reads these rules and implements them, proxying real traffic to the right backends. The key benefit: one shared public IP and one load balancer for all services instead of one per service.
+
+2. **What is the difference between an Ingress resource and an Ingress Controller?** — The Ingress resource is a YAML object — it declares routing rules (path /api/ goes to api-gateway). It is passive config. The Ingress Controller is the actual running software (a pod) that reads Ingress resources and implements them by configuring NGINX, HAProxy, or another proxy to handle real traffic. Kubernetes ships with no built-in Ingress Controller — you must install one. In AzureShop, the NGINX Ingress Controller is installed in the `ingress-nginx` namespace via Helm.
+
+3. **What is the difference between Ingress and a Service of type LoadBalancer?** — A Service of type LoadBalancer creates one Azure Load Balancer per service with its own public IP — 8 services means 8 IPs and 8 load balancers (expensive, hard to manage). An Ingress uses ONE load balancer with ONE IP and routes all traffic to the right service based on URL path or hostname. Additionally, Ingress supports HTTP-level features: TLS termination, path rewrites, rate limiting, canary deployments. LoadBalancer Services are for non-HTTP protocols or when you need a service directly internet-accessible.
+
+4. **How does AzureShop route traffic from the internet to user-service?** — Browser sends HTTPS to the Azure Application Gateway (WAF_v2), which inspects traffic with OWASP rules, terminates TLS, and forwards HTTP to the NGINX Ingress Controller's external IP. NGINX reads the path `/api/users/profile`, matches the Ingress rule `/api/ → api-gateway:8080`, and proxies to the api-gateway ClusterIP. The api-gateway is itself an NGINX container — it reads its own `nginx.conf`, matches `location /api/users/` → upstream user-service, strips the prefix, and proxies to user-service:3001. Three routing layers, each with a different responsibility.
+
+5. **What are annotations in an Ingress resource and why are they important?** — Annotations are key-value pairs in the Ingress metadata that pass controller-specific configuration. They are not standard Kubernetes — they are instructions specific to your chosen controller. NGINX Ingress has 50+ annotations: `nginx.ingress.kubernetes.io/proxy-read-timeout` sets backend timeout, `nginx.ingress.kubernetes.io/canary: "true"` enables canary routing, `nginx.ingress.kubernetes.io/use-regex: "true"` enables regex path matching. Without annotations you only get basic routing. With annotations you get full control over proxying, auth, rate limiting, CORS, rewrites, and more.
+
+6. **How does the canary deployment work with NGINX Ingress in AzureShop?** — Two Ingress objects define the same path `/api/users`. The stable Ingress routes to `user-service` (production version). The canary Ingress has the annotation `canary: "true"` and `canary-weight: "20"`, routing to `user-service-canary` (new version). NGINX randomly splits traffic: 80% to stable, 20% to canary. No changes to application code or the Service. To promote: increase canary-weight to 100 then update stable. To rollback: delete the canary Ingress — all traffic instantly returns to stable. Alternative strategies: route by header (`X-Canary: always`) or by cookie for targeted testing.
+
+7. **Why does AzureShop use two layers of NGINX — the NGINX Ingress Controller and the api-gateway?** — They serve different purposes at different layers. The NGINX Ingress Controller handles Kubernetes-level routing: receives traffic from the internet, routes `/api/*` to api-gateway and `/` to frontend, handles canary deployments and TLS. The api-gateway is an application-level router: it receives all API traffic and further routes `/api/users/` to user-service, `/api/products/` to product-service, etc., while also applying per-service rate limits and auth handling. Separating them keeps each layer simple and independently configurable.
+
+8. **How does NetworkPolicy interact with Ingress in AzureShop?** — AzureShop uses zero-trust NetworkPolicy — by default all pod-to-pod traffic is blocked. The NetworkPolicy on each service pod has an `ingress.from` rule that explicitly allows traffic from the `ingress-nginx` namespace (where the NGINX controller pods run) and from the `dev` namespace (for service-to-service calls). Without this rule, even if the Ingress correctly routes a request to user-service, the NetworkPolicy would drop the packet silently at the pod level and the request would fail. Ingress and NetworkPolicy work together: Ingress handles L7 routing, NetworkPolicy handles L3/L4 enforcement.
