@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison).
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation).
 
 ---
 
@@ -33,6 +33,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 24. [What are Labels and Selectors in Kubernetes? How are They Different and How Does AzureShop Use Them?](#q24-what-are-labels-and-selectors-in-kubernetes-how-are-they-different-and-how-does-azureshop-use-them)
 25. [What is Kubernetes RBAC? How Does it Work, What are Roles, RoleBindings, ClusterRoles, and ServiceAccounts?](#q25-what-is-kubernetes-rbac-how-does-it-work-what-are-roles-rolebindings-clusterroles-and-serviceaccounts)
 26. [What is a Service Mesh? What is Istio, How Does it Work, and What Problems Does it Solve in Kubernetes?](#q26-what-is-a-service-mesh-what-is-istio-how-does-it-work-and-what-problems-does-it-solve-in-kubernetes)
+27. [How Does Autoscaling Work in Kubernetes? Explain HPA, VPA, Cluster Autoscaler, and KEDA with How Services Fit In](#q27-how-does-autoscaling-work-in-kubernetes-explain-hpa-vpa-cluster-autoscaler-and-keda-with-how-services-fit-in)
 
 ---
 
@@ -4960,3 +4961,599 @@ unmanaged by mesh                 into the mesh's control
 7. **What is a circuit breaker and why does Istio need one?** — A circuit breaker prevents cascading failures. If payment-service starts returning errors, without a circuit breaker, order-service keeps calling it and fills up its thread pool, eventually going down itself — taking down the whole platform. Istio's circuit breaker (configured via DestinationRule outlierDetection) watches error rates per pod. If a pod returns 5 consecutive errors, Istio stops routing to it for 30 seconds. Traffic goes to healthy pods only. After the cooldown, Istio sends one probe request to check if the pod recovered. This stops one failing service from cascading into a full outage.
 
 8. **What does AzureShop gain from using Istio vs what it does today?** — Today AzureShop uses plain Kubernetes: inter-service traffic is unencrypted HTTP, any service can call any other service, there is no distributed tracing, and kube-proxy does only random load balancing. With Istio: all 8 services communicate via mTLS (encrypted, identity-verified), payment-service would be locked to only accept calls from order-service via AuthorizationPolicy, every request across all 6 hops is automatically traced in Jaeger with per-hop latency, and canary deployments become precise percentage splits. The trade-off is ~50MB RAM per pod overhead and increased operational complexity — justified at enterprise scale but overkill for a dev learning environment.
+
+---
+
+## Q27. How Does Autoscaling Work in Kubernetes? Explain HPA, VPA, Cluster Autoscaler, and KEDA with How Services Fit In
+
+### Why Autoscaling Matters
+
+Imagine AzureShop on a normal Tuesday at 2am — very few users, low traffic. You have 2 pods per service running. Now imagine Black Friday at noon — 100x more traffic. If you still have 2 pods per service, your services will be overwhelmed, requests will time out, and customers will leave.
+
+Manual scaling means someone stays up all night watching dashboards and running `kubectl scale` commands. That is not realistic for a production system.
+
+**Autoscaling** is Kubernetes automatically adding or removing pods (and even nodes) based on real-time demand — no human intervention needed.
+
+In Kubernetes there are four distinct autoscaling mechanisms, each solving a different problem:
+
+| Mechanism | What it scales | Based on | Scope |
+|---|---|---|---|
+| **HPA** — Horizontal Pod Autoscaler | Pod count | CPU, memory, custom metrics | Per Deployment |
+| **VPA** — Vertical Pod Autoscaler | Pod resource requests/limits | Historical usage | Per Deployment |
+| **Cluster Autoscaler** | Node count | Pending pods / underutilized nodes | Entire cluster |
+| **KEDA** — Event-driven autoscaler | Pod count (including to zero) | Queue length, events, any metric | Per Deployment |
+
+They work at different layers and are often used together:
+
+```
+KEDA / HPA                    → scales PODS (adds more copies of the same container)
+Cluster Autoscaler            → scales NODES (adds more VMs to the cluster)
+VPA                           → scales RESOURCES per pod (more CPU/RAM per container)
+```
+
+---
+
+### Before Autoscaling: What is a Service and Why Does it Matter Here?
+
+You asked about Services in the context of autoscaling. This is one of the most important connections to understand. (Services are covered in full detail in Q22 — this section explains specifically how Services enable transparent autoscaling.)
+
+**The problem without Services:**
+
+Imagine a caller (api-gateway) wants to send traffic to product-service. It would need to know each pod's IP address. But when HPA adds 2 new pods, those new pods have brand new IP addresses. The caller would have to be reconfigured to know about the new pods. That is impossible to do automatically.
+
+**How a Service solves this for autoscaling:**
+
+A Kubernetes Service has a **single stable ClusterIP** (e.g., `10.0.12.5`) that never changes, regardless of how many pods are running behind it. The Service uses a **label selector** to automatically find all pods matching `app.kubernetes.io/name: product-service`. As HPA adds or removes pods, the Service's EndpointSlice is **automatically updated** — new pods are added to the routing table, deleted pods are removed. The caller always talks to the same ClusterIP and never needs to know anything has changed.
+
+```
+Before scaling (2 pods):
+api-gateway → 10.0.12.5 (ClusterIP: product-service)
+                  ↓ kube-proxy
+             ├── pod 10.240.0.7  (50% chance)
+             └── pod 10.240.0.8  (50% chance)
+
+After HPA adds 3 more pods (5 pods total):
+api-gateway → 10.0.12.5 (same ClusterIP — nothing changes for caller)
+                  ↓ kube-proxy
+             ├── pod 10.240.0.7  (20% chance)
+             ├── pod 10.240.0.8  (20% chance)
+             ├── pod 10.240.1.2  (20% chance)  ← new
+             ├── pod 10.240.1.3  (20% chance)  ← new
+             └── pod 10.240.1.4  (20% chance)  ← new
+```
+
+The Service is what makes autoscaling transparent. Without a Service, autoscaling would be useless because callers would never find the new pods.
+
+---
+
+### Part 1: HPA — Horizontal Pod Autoscaler
+
+#### What It Does
+
+HPA adds more pod replicas when load is high, and removes them when load drops. "Horizontal" means scaling out/in — adding more copies of the same thing (as opposed to vertical, which means making each copy bigger).
+
+Think of it like a restaurant: when it gets busy, you call in more waiters (scale out). When it quiets down, you send waiters home (scale in). Each waiter is identical — same job, same capability. You are just changing the number of them.
+
+#### How HPA Works Internally
+
+HPA is a built-in Kubernetes controller (part of kube-controller-manager). It runs a control loop every 15 seconds:
+
+```
+Every 15 seconds:
+  1. Query metrics-server: "What is the average CPU across all product-service pods?"
+  2. Metrics-server returns: average CPU = 85%
+  3. HPA has target: 70% CPU
+  4. HPA calculates: desired replicas = ceil(current replicas × (current / target))
+                                      = ceil(2 × (85 / 70))
+                                      = ceil(2 × 1.21)
+                                      = ceil(2.43)
+                                      = 3
+  5. HPA updates Deployment: spec.replicas = 3
+  6. Deployment controller creates 1 new pod
+  7. New pod starts, passes readiness probe, joins Service endpoints
+  8. Traffic is now spread across 3 pods
+```
+
+The formula: `desiredReplicas = ceil(currentReplicas × (currentMetricValue / desiredMetricValue))`
+
+#### What is metrics-server?
+
+metrics-server is a lightweight in-cluster component that scrapes CPU and memory usage from the `kubelet` on each node every 15 seconds. HPA queries metrics-server to get real-time resource usage. Without metrics-server, HPA cannot function.
+
+In AKS, metrics-server is pre-installed on the system node pool — it is one of the critical system components that the system pool runs. You can verify it with: `kubectl top pods -n azureshop`.
+
+#### Scale-Up vs Scale-Down Behaviour
+
+HPA scales up aggressively (responds quickly to traffic spikes) but scales down conservatively (waits before removing pods, to avoid thrashing):
+
+- **Scale up:** Acts immediately when the metric exceeds the target for 3 consecutive checks
+- **Scale down:** Waits for a **stabilisation window** (default: 5 minutes) — it only scales down after the metric has been below target for 5 minutes continuously
+
+This prevents the "flapping" problem: load spikes to 85%, HPA adds pods, load drops to 60%, HPA removes pods, load spikes again, repeat forever. The 5-minute cooldown breaks this cycle.
+
+#### HPA in AzureShop — Exact Implementation
+
+Every one of the 8 AzureShop services has an HPA created by Helm.
+
+File: `helm/charts/user-service/templates/hpa.yaml`
+
+```yaml
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: user-service
+  namespace: dev
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: user-service        # HPA controls this Deployment
+  minReplicas: 2              # never go below 2 (always HA)
+  maxReplicas: 10             # never go above 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70   # target 70% CPU across all pods
+```
+
+Values from `helm/charts/user-service/values.yaml`:
+```yaml
+replicaCount: 2          # initial replica count set in Deployment
+
+hpa:
+  minReplicas: 2         # minimum 2 replicas at all times
+  maxReplicas: 10        # maximum 10 replicas under load
+  cpuUtilizationPercentage: 70  # scale when average CPU > 70%
+
+resources:
+  requests:
+    cpu: "100m"          # HPA uses this as the baseline for % calculation
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+```
+
+**Why `minReplicas: 2`?** Because if user-service had only 1 pod and that pod crashed, there would be a brief period with zero pods — meaning zero availability for that service. With 2 minimum replicas, if one crashes the other keeps serving while the replacement starts. This is the minimum for High Availability.
+
+**Why `averageUtilization: 70` and not 90 or 100?**
+CPU utilization of 100% means pods are completely saturated — requests are already failing or queueing. By targeting 70%, you trigger scale-out before pods are overwhelmed. The 30% headroom absorbs the spike while new pods are starting (pods take 10-30 seconds to become ready).
+
+**How the % is calculated:** If `requests.cpu = 100m` and the pod is using `70m` of CPU, utilization = 70%. So when a user-service pod uses more than 70m CPU on average across all replicas, HPA triggers scale-out.
+
+#### HPA with Multiple Metrics
+
+AzureShop uses only CPU today, but HPA v2 supports multiple metrics simultaneously — it scales to satisfy the most demanding metric:
+
+```yaml
+metrics:
+  # CPU-based scaling
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+
+  # Memory-based scaling
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80
+
+  # Custom metric — requests per second (requires Prometheus adapter)
+  - type: Pods
+    pods:
+      metric:
+        name: http_requests_per_second
+      target:
+        type: AverageValue
+        averageValue: "100"        # scale if any pod handles >100 req/s
+```
+
+HPA calculates the desired replica count independently for each metric and takes the **maximum**. If CPU says "need 3 replicas" and memory says "need 5 replicas", HPA scales to 5.
+
+---
+
+### Part 2: VPA — Vertical Pod Autoscaler
+
+#### What It Does
+
+VPA adjusts the CPU and memory **requests and limits** of running pods based on their actual historical usage. "Vertical" means making each pod bigger or smaller — more CPU, more RAM.
+
+Think of the restaurant analogy again: instead of calling in more waiters (HPA), you train each waiter to work faster or give them better tools (VPA). You change the capability of each copy, not the number.
+
+#### The Problem VPA Solves
+
+When you deploy a service, you guess at the resource requests:
+```yaml
+resources:
+  requests:
+    cpu: "100m"     # is this right? what if the app actually needs 250m?
+    memory: "128Mi" # what if it actually uses 300Mi?
+```
+
+If your requests are too low, pods get throttled or OOMKilled. If too high, you waste cluster resources and the scheduler cannot pack pods efficiently.
+
+VPA watches actual usage over time and recommends (or automatically applies) correct values:
+
+```
+VPA observes user-service over 7 days:
+  Actual CPU usage: p50=180m, p95=380m
+  Actual memory:    p50=220Mi, p95=410Mi
+
+VPA recommendation:
+  requests.cpu:    "200m"    (was 100m — too low)
+  requests.memory: "256Mi"   (was 128Mi — too low)
+  limits.cpu:      "500m"    (unchanged)
+  limits.memory:   "512Mi"   (unchanged)
+```
+
+#### VPA Modes
+
+| Mode | What happens |
+|---|---|
+| `Off` | VPA only recommends — you apply manually |
+| `Initial` | VPA sets resources when pod is created, never changes running pods |
+| `Auto` | VPA automatically evicts pods and recreates them with new resource values |
+
+The `Auto` mode is the most powerful but also the most disruptive — it must restart pods to apply new resource settings. This is why VPA and HPA should not both control the same metric simultaneously. If HPA is scaling on CPU and VPA is changing CPU requests, they fight each other. Common practice: use HPA for CPU-based scaling, VPA for memory recommendations only.
+
+#### VPA is NOT installed in AzureShop
+
+AzureShop does not currently use VPA. It is a separate component that must be installed explicitly. The resource values in `values.yaml` (`requests.cpu: 100m`, `memory: 128Mi`) were set manually based on estimates. VPA would let you measure actual usage and tune these automatically.
+
+---
+
+### Part 3: Cluster Autoscaler — Scaling the Nodes
+
+#### What It Does
+
+HPA adds more pods. But what if the cluster has no room for new pods? The node VMs are all full. This is where the **Cluster Autoscaler** comes in — it adds or removes entire **nodes** (VMs) from the cluster.
+
+Think of it like: HPA calls more waiters (pods), but the restaurant is full (no free tables/nodes). The Cluster Autoscaler builds more tables — adds more VMs to the cluster so there is room for the new pods.
+
+#### Scale-Up: Adding Nodes
+
+```
+1. HPA decides product-service needs 8 pods (currently 3 running)
+2. Kubernetes scheduler tries to place 5 new pods
+3. No node has enough free CPU/memory for 5 pods
+4. Pods remain in "Pending" state
+5. Cluster Autoscaler sees: there are Pending pods that cannot be scheduled
+6. Cluster Autoscaler asks AKS to add a new node to the user node pool
+7. AKS provisions a new VM (Standard_D2s_v3), joins it to the cluster
+8. Pending pods are scheduled on the new node
+9. All 8 pods are now running
+```
+
+This takes 2-5 minutes (VM provisioning is not instant). During that time, the existing pods handle traffic at higher load.
+
+#### Scale-Down: Removing Nodes
+
+```
+1. Traffic drops. HPA scales product-service back to 3 pods.
+2. One node now has very few pods on it (mostly empty)
+3. Cluster Autoscaler checks: can all pods on this node fit on other nodes?
+4. Yes → Cluster Autoscaler cordons the node (no new pods scheduled)
+5. Drains the node: pods are evicted (gracefully) and rescheduled elsewhere
+6. Cluster Autoscaler asks AKS to delete the VM
+7. Node is removed, you stop paying for it
+```
+
+Scale-down has a 10-minute delay by default — the node must be underutilised for 10 consecutive minutes before removal.
+
+#### Cluster Autoscaler in AzureShop — Exact Implementation
+
+File: `infra/modules/aks/main.tf`
+
+```hcl
+# User Node Pool — runs application workloads
+resource "azurerm_kubernetes_cluster_node_pool" "user" {
+  name  = "user"
+  vm_size = "Standard_D2s_v3"   # 2 vCPU, 8GB RAM per node
+
+  auto_scaling_enabled = true    # ← Cluster Autoscaler is active
+  node_count  = 1                # starting node count
+  min_count   = 1                # never go below 1 node
+  max_count   = 3                # never go above 3 nodes (free tier quota)
+
+  lifecycle {
+    ignore_changes = [node_count]  # ← don't fight the autoscaler in Terraform
+  }
+}
+```
+
+File: `infra/modules/aks/variables.tf`
+```hcl
+variable "user_node_min_count" { default = 1 }   # minimum 1 node
+variable "user_node_max_count" { default = 3 }   # maximum 3 nodes
+```
+
+**`ignore_changes = [node_count]`** — this is critical. Without it, every time you run `terraform apply`, Terraform would see the autoscaler changed `node_count` from 1 to 2 (or 3) and try to set it back to 1. The `ignore_changes` tells Terraform "the autoscaler owns this field, don't touch it."
+
+**System node pool (`default_node_pool`):** The system node pool has `node_count = 2` (fixed) with no autoscaling. System nodes run CoreDNS and metrics-server — they must always be available. You don't autoscale the control plane components.
+
+#### HPA + Cluster Autoscaler Together — The Full Picture
+
+```
+Traffic spike hits AzureShop on Black Friday:
+
+1. CPU on product-service pods rises above 70%
+   → HPA says: "scale from 3 to 8 pods"
+   → Scheduler: "only room for 2 new pods on existing nodes — 3 pods Pending"
+
+2. Cluster Autoscaler sees 3 Pending pods
+   → Asks AKS: "add 1 more node to user pool"
+   → New node joins (2-5 minutes later)
+
+3. 3 Pending pods scheduled on new node
+   → All 8 pods now running
+   → CPU drops back below 70%
+
+4. Traffic normalises at midnight
+   → HPA says: "scale back to 3 pods"
+   → Empty node has few pods, can be drained
+   → Cluster Autoscaler removes the node (saves cost)
+```
+
+They work in concert: HPA manages pods, Cluster Autoscaler manages the infrastructure those pods run on.
+
+---
+
+### Part 4: KEDA — Kubernetes Event-Driven Autoscaling
+
+#### What It Does
+
+HPA only scales based on CPU and memory (or custom metrics with an adapter). But many real-world scaling scenarios are event-driven:
+
+- A queue has 10,000 messages → you need more workers to process them
+- A database has 500 pending jobs → you need more processors
+- A Kafka topic has 1M unread events → you need more consumers
+- At night (no traffic) → you want zero pods to save cost
+
+KEDA (Kubernetes Event-Driven Autoscaler) connects external event sources to Kubernetes scaling. It can scale deployments from **0 to N and back to 0** — something HPA cannot do (HPA minimum is 1).
+
+#### How KEDA Works
+
+KEDA installs as an operator (custom controller) in the cluster. You define a `ScaledObject` that connects a Deployment to an external trigger:
+
+```yaml
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: notification-service-scaler
+  namespace: dev
+spec:
+  scaleTargetRef:
+    name: notification-service     # the Deployment to scale
+  minReplicaCount: 0               # ← can go to ZERO (HPA cannot do this)
+  maxReplicaCount: 20
+  triggers:
+    - type: azure-servicebus        # scale based on Azure Service Bus queue depth
+      metadata:
+        queueName: notification-queue
+        namespace: sb-azureshop-dev
+        messageCount: "10"         # 1 pod per 10 messages in the queue
+```
+
+With this: when the notification queue is empty → 0 pods (no cost). When 100 messages arrive → KEDA scales to 10 pods. When the queue drains → back to 0 pods.
+
+#### KEDA Scalers — What Sources It Supports
+
+KEDA has 70+ built-in scalers:
+
+| Scaler | Scales based on |
+|---|---|
+| `azure-servicebus` | Azure Service Bus queue/topic depth |
+| `azure-eventhub` | Azure Event Hub consumer lag |
+| `azure-storage-queue` | Azure Storage Queue message count |
+| `prometheus` | Any Prometheus metric (requests/sec, custom app metric) |
+| `kafka` | Kafka consumer group lag |
+| `rabbitmq` | RabbitMQ queue depth |
+| `cron` | Time-based (scale to 0 at night, back up in the morning) |
+| `postgresql` | PostgreSQL query result |
+| `redis` | Redis list length |
+| `http` | HTTP request rate (via HTTP Add-On) |
+
+#### KEDA vs HPA
+
+| | HPA | KEDA |
+|---|---|---|
+| **Minimum replicas** | 1 (cannot go to 0) | 0 (can scale to zero) |
+| **Metrics source** | CPU, memory, custom (via adapter) | 70+ external sources natively |
+| **Event-driven** | No | Yes — reacts to queue depth, events |
+| **Installation** | Built into Kubernetes | Must install separately |
+| **AzureShop** | Used — all 8 services | Not used today |
+| **Best for** | Web servers, APIs (always need to serve) | Queue workers, batch processors |
+
+For AzureShop's notification-service (which processes messages from a queue), KEDA would be a perfect fit — scale to 0 when no notifications are pending, scale up instantly when the queue fills.
+
+#### Scale to Zero — Why It Matters for Cost
+
+With KEDA scaling notification-service to zero replicas overnight:
+
+```
+Normal HPA (minimum 2 replicas always running):
+  2 pods × 24 hours × 365 days = 17,520 pod-hours of compute cost
+
+KEDA (queue empty 14 hours/day → 0 pods):
+  2 pods × 10 hours × 365 days = 7,300 pod-hours
+  Savings: 58% reduction in compute cost for that service
+```
+
+For batch processing services that only run when there is work, KEDA can save significant cost compared to always-on HPA.
+
+---
+
+### The Four Autoscalers Working Together — Full Picture
+
+```
+                        KUBERNETES AUTOSCALING STACK
+                        ════════════════════════════
+
+  LAYER 3: KEDA
+  ─────────────────────────────────────────────────────────
+  Trigger: "Azure Service Bus queue has 500 messages"
+  Action:  Scale notification-service from 0 → 50 pods
+  ─────────────────────────────────────────────────────────
+
+  LAYER 2: HPA
+  ─────────────────────────────────────────────────────────
+  Trigger: "product-service average CPU > 70%"
+  Action:  Scale product-service from 2 → 8 pods
+  ─────────────────────────────────────────────────────────
+
+  LAYER 1: Cluster Autoscaler
+  ─────────────────────────────────────────────────────────
+  Trigger: "8 pods are Pending — no room on existing nodes"
+  Action:  Add 2 more VMs to user node pool
+  ─────────────────────────────────────────────────────────
+
+  LAYER 0: VPA (advisory)
+  ─────────────────────────────────────────────────────────
+  Trigger: "product-service pods consistently use 350m CPU but request only 100m"
+  Action:  Recommend (or apply) requests.cpu = "400m"
+  ─────────────────────────────────────────────────────────
+
+  Kubernetes Service (transparent connector):
+  ─────────────────────────────────────────────────────────
+  As pods are added/removed by any autoscaler above:
+  → EndpointSlice controller updates Service endpoints
+  → kube-proxy updates iptables rules on all nodes
+  → Callers see no change — same ClusterIP, traffic spreads automatically
+  ─────────────────────────────────────────────────────────
+```
+
+---
+
+### How the Service Enables Autoscaling to Be Transparent
+
+This is the full internal sequence when HPA adds a new pod:
+
+```
+1. HPA updates Deployment: replicas 2 → 3
+2. ReplicaSet controller creates a new pod
+3. Scheduler places pod on a node
+4. kubelet starts the container
+5. Container passes startupProbe (30s × 30 attempts = up to 5 min wait)
+6. Container passes readinessProbe (initialDelaySeconds: 10, then every 5s)
+7. Pod status becomes Ready = True
+8. EndpointSlice controller notices the new pod is Ready + has matching labels
+9. EndpointSlice controller adds new pod IP to the EndpointSlice
+10. kube-proxy on every node watches EndpointSlices
+11. kube-proxy updates iptables DNAT rules to include the new pod IP
+12. New traffic is now routed to the new pod automatically
+
+Callers (api-gateway, nginx) did not change their config at all.
+They still talk to the same ClusterIP. The new pod just starts receiving
+its share of traffic as soon as it passes the readiness probe.
+```
+
+Steps 5-6 are why the **readiness probe** is critical for autoscaling. Without it, the new pod would be added to the Service endpoints before it is ready to serve traffic — callers would get errors. The readiness probe acts as a gate: "only add me to the load balancer when I am truly ready."
+
+In AzureShop all 8 services define readiness probes in their Deployment template:
+```yaml
+readinessProbe:
+  httpGet:
+    path: /health
+    port: 3001
+  initialDelaySeconds: 10    # wait 10s before first check
+  periodSeconds: 5           # check every 5s
+  failureThreshold: 3        # need 3 consecutive failures to mark not-ready
+```
+
+---
+
+### Scale-In: What Happens When a Pod is Removed
+
+When HPA removes a pod (scale in), the sequence is just as important:
+
+```
+1. HPA updates Deployment: replicas 5 → 3 (removing 2 pods)
+2. Deployment controller marks 2 pods for deletion
+3. Kubernetes sends SIGTERM to the container process
+4. Pod moves to "Terminating" state
+5. EndpointSlice controller removes the terminating pod from endpoints
+6. kube-proxy updates iptables — no new traffic goes to the terminating pod
+7. Container has terminationGracePeriodSeconds (default 30s) to finish in-flight requests
+8. After 30s, if process hasn't exited, SIGKILL is sent
+9. Pod is deleted
+```
+
+Step 5 and 6 happen before Step 7 — the pod is removed from the Service BEFORE it is killed, so no new requests land on it while it is shutting down. Existing in-flight requests complete during the grace period. This is how zero-downtime scale-in works.
+
+---
+
+### AzureShop Autoscaling — Complete Summary
+
+| Component | Current Config | Effect |
+|---|---|---|
+| **user-service HPA** | min 2, max 10, CPU 70% | Scales pods 2–10 based on CPU |
+| **product-service HPA** | min 2, max 10, CPU 70% | Scales pods 2–10 based on CPU |
+| **cart-service HPA** | min 2, max 10, CPU 70% | Scales pods 2–10 based on CPU |
+| **order-service HPA** | min 2, max 10, CPU 70% | Scales pods 2–10 based on CPU |
+| **payment-service HPA** | min 2, max 10, CPU 70% | Scales pods 2–10 based on CPU |
+| **api-gateway HPA** | min 2, max 10, CPU 70% | Scales pods 2–10 based on CPU |
+| **frontend HPA** | min 2, max 10, CPU 70% | Scales pods 2–10 based on CPU |
+| **notification-service HPA** | min 2, max 10, CPU 70% | Scales pods 2–10 based on CPU |
+| **User node pool (CA)** | min 1 node, max 3 nodes | Scales VMs when pods are Pending |
+| **System node pool** | Fixed 2 nodes | No autoscaling — always stable |
+| **VPA** | Not used | Resource requests set manually |
+| **KEDA** | Not used | notification-service would benefit |
+| **Services** | ClusterIP per service | Transparent — endpoints auto-update on scale |
+
+For the free-tier dev cluster, 8 services × up to 10 pods = 80 pods maximum. Each `Standard_D2s_v3` node (2 vCPU, 8GB) can run about 8-10 pods comfortably. Maximum 3 user nodes × 10 pods = 30 pods — in practice, the HPA on a dev cluster with low traffic keeps replica counts at minimum (2 per service = 16 pods total), well within 1-2 nodes.
+
+---
+
+### Common Autoscaling Mistakes
+
+**Mistake 1: No resource requests set**
+
+```yaml
+resources: {}   # no requests defined!
+```
+
+HPA cannot calculate utilisation percentage without a baseline (`requests.cpu`). If you don't set resource requests, HPA silently does nothing. Always set `resources.requests`.
+
+**Mistake 2: Readiness probe missing**
+
+Without a readiness probe, new pods are added to Service endpoints the moment they start — before the app has initialised. Early requests fail with connection refused. Always define a readiness probe.
+
+**Mistake 3: VPA and HPA both controlling CPU**
+
+VPA changes CPU requests → HPA recalculates desired replicas based on new requests → HPA scales → VPA recalculates → endless loop. Use one or the other for CPU. Safe combination: HPA on CPU, VPA on memory (advisory mode only).
+
+**Mistake 4: `minReplicas: 1` on critical services**
+
+If the single pod crashes, there is a gap with zero availability while a replacement starts (10-30 seconds). For any service that must be highly available, always set `minReplicas: 2`.
+
+**Mistake 5: Terraform fights the Cluster Autoscaler**
+
+Without `ignore_changes = [node_count]` in the Terraform lifecycle block, every `terraform apply` resets node count to the initial value, undoing what the Cluster Autoscaler did. Always add `ignore_changes = [node_count]` to autoscaled node pools.
+
+---
+
+### Interview Prep
+
+1. **What is the difference between HPA and VPA?** — HPA (Horizontal Pod Autoscaler) changes the NUMBER of pod replicas — it adds more copies of your container when load increases. VPA (Vertical Pod Autoscaler) changes the SIZE of each pod — it increases or decreases CPU and memory requests/limits per pod based on actual usage. HPA scales out; VPA scales up. They should not both control the same metric (e.g., both controlling CPU) as they will conflict. Common pattern: HPA for pod count scaling, VPA in advisory mode to right-size resource requests.
+
+2. **What is the HPA scaling formula?** — `desiredReplicas = ceil(currentReplicas × (currentMetricValue / desiredMetricValue))`. If you have 2 pods, average CPU is 85%, and target is 70%: `ceil(2 × 85/70) = ceil(2.43) = 3`. HPA rounds up to ensure capacity is always sufficient. It checks every 15 seconds. Scale-up happens immediately when threshold is breached for 3 checks; scale-down waits 5 minutes (stabilisation window) to prevent thrashing.
+
+3. **What is the Cluster Autoscaler and how does it work with HPA?** — The Cluster Autoscaler adds or removes nodes (VMs) from the cluster. HPA and Cluster Autoscaler work together: HPA detects high CPU and decides more pods are needed. The scheduler cannot place pods because nodes are full — pods stay Pending. The Cluster Autoscaler sees Pending pods and asks the cloud provider to add a new node. Once the node joins, pending pods are scheduled. When traffic drops, HPA removes pods, the node empties, and the Cluster Autoscaler removes the node. In AzureShop, the user node pool has `auto_scaling_enabled = true` with min 1 and max 3 nodes.
+
+4. **What is KEDA and how is it different from HPA?** — KEDA (Kubernetes Event-Driven Autoscaler) scales pods based on external event sources — Azure Service Bus queue depth, Kafka consumer lag, Redis list length, time of day, etc. The critical difference from HPA: KEDA can scale deployments to **zero replicas** and back. HPA minimum is 1. For batch processors and queue workers, this means zero cost when idle. KEDA also has 70+ native scalers with no custom metric adapter needed. In AzureShop, notification-service would benefit from KEDA — scale to 0 when the notification queue is empty, scale up when messages arrive.
+
+5. **Why does a Kubernetes Service matter for autoscaling?** — A Service provides a single stable ClusterIP that never changes regardless of pod count. As HPA adds or removes pods, the EndpointSlice controller automatically updates the Service's routing table — new pods are added once they pass their readiness probe, removed pods are deleted from the table before shutdown. Callers always use the same ClusterIP and see no disruption during scaling. Without a Service, every caller would need to track pod IPs manually — autoscaling would be useless because callers would never find the new pods.
+
+6. **What is the role of the readiness probe in autoscaling?** — The readiness probe determines when a newly scaled pod is actually ready to receive traffic. When HPA adds a pod, the pod is NOT added to the Service endpoints until its readiness probe passes. This prevents the Service from routing traffic to a pod that is still initialising. In AzureShop, all 8 services have `initialDelaySeconds: 10` before the first readiness check — giving Node.js time to start before any traffic arrives. Without readiness probes, callers would get connection errors during scale-out events.
+
+7. **What is the stabilisation window in HPA and why does it exist?** — The stabilisation window (default 5 minutes for scale-down) prevents HPA from rapidly scaling up and down — called "thrashing" or "flapping". Without it: load spikes → HPA adds pods → load drops → HPA removes pods → spike again → repeat indefinitely. This causes constant pod churn, degraded performance, and wasted resources. The 5-minute stabilisation window means the metric must be consistently below the target for 5 full minutes before HPA removes pods. Scale-up has no stabilisation delay — it acts immediately to handle spikes.
+
+8. **How does `ignore_changes = [node_count]` in Terraform relate to the Cluster Autoscaler?** — The Cluster Autoscaler dynamically changes the `node_count` value on the AKS node pool as it adds/removes nodes. Terraform tracks the initial value of `node_count` in its state file. Without `ignore_changes`, every `terraform apply` would see the autoscaler-changed value as drift and reset it back to the initial count — destroying the autoscaler's work and causing downtime. Adding `ignore_changes = [node_count]` to the lifecycle block tells Terraform "this field is owned by the Cluster Autoscaler, do not touch it." All AzureShop autoscaled node pools include this.
