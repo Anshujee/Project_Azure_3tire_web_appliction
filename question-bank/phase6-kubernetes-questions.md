@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation).
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File).
 
 ---
 
@@ -34,6 +34,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 25. [What is Kubernetes RBAC? How Does it Work, What are Roles, RoleBindings, ClusterRoles, and ServiceAccounts?](#q25-what-is-kubernetes-rbac-how-does-it-work-what-are-roles-rolebindings-clusterroles-and-serviceaccounts)
 26. [What is a Service Mesh? What is Istio, How Does it Work, and What Problems Does it Solve in Kubernetes?](#q26-what-is-a-service-mesh-what-is-istio-how-does-it-work-and-what-problems-does-it-solve-in-kubernetes)
 27. [How Does Autoscaling Work in Kubernetes? Explain HPA, VPA, Cluster Autoscaler, and KEDA with How Services Fit In](#q27-how-does-autoscaling-work-in-kubernetes-explain-hpa-vpa-cluster-autoscaler-and-keda-with-how-services-fit-in)
+28. [What is a Persistent Volume and a Persistent Volume Claim in Kubernetes?](#q28-what-is-a-persistent-volume-and-a-persistent-volume-claim-in-kubernetes)
 
 ---
 
@@ -5557,3 +5558,511 @@ Without `ignore_changes = [node_count]` in the Terraform lifecycle block, every 
 7. **What is the stabilisation window in HPA and why does it exist?** — The stabilisation window (default 5 minutes for scale-down) prevents HPA from rapidly scaling up and down — called "thrashing" or "flapping". Without it: load spikes → HPA adds pods → load drops → HPA removes pods → spike again → repeat indefinitely. This causes constant pod churn, degraded performance, and wasted resources. The 5-minute stabilisation window means the metric must be consistently below the target for 5 full minutes before HPA removes pods. Scale-up has no stabilisation delay — it acts immediately to handle spikes.
 
 8. **How does `ignore_changes = [node_count]` in Terraform relate to the Cluster Autoscaler?** — The Cluster Autoscaler dynamically changes the `node_count` value on the AKS node pool as it adds/removes nodes. Terraform tracks the initial value of `node_count` in its state file. Without `ignore_changes`, every `terraform apply` would see the autoscaler-changed value as drift and reset it back to the initial count — destroying the autoscaler's work and causing downtime. Adding `ignore_changes = [node_count]` to the lifecycle block tells Terraform "this field is owned by the Cluster Autoscaler, do not touch it." All AzureShop autoscaled node pools include this.
+
+---
+
+## Q28. What is a Persistent Volume and a Persistent Volume Claim in Kubernetes?
+
+### The Core Problem — Containers Lose Their Data
+
+Every container in Kubernetes has an **ephemeral filesystem**. When a container starts, it gets a fresh copy of whatever was in the container image. When it stops or restarts, everything written to the filesystem disappears.
+
+This is fine for stateless services like your Node.js API — the app code is in the image, the data it handles lives in a database. But for **stateful workloads** — databases, monitoring systems, message queues — the data must survive pod restarts. If Prometheus restarts and loses all its metrics data, your 15-day retention window disappears. If a PostgreSQL pod restarts and loses its data directory, your entire database is gone.
+
+This is the problem Kubernetes Persistent Volumes solve.
+
+Think of it like a laptop vs an external hard drive. Your laptop (the pod) can be wiped or replaced — but the external hard drive (the Persistent Volume) is separate hardware that holds your data. Even if the laptop dies, the data on the external drive survives.
+
+---
+
+### Volume Types in Kubernetes — From Ephemeral to Persistent
+
+Before diving into PVs and PVCs, it helps to understand all the volume types in Kubernetes, from least to most persistent:
+
+| Volume Type | Survives container restart? | Survives pod deletion? | Survives node failure? | Use case |
+|---|---|---|---|---|
+| **Container filesystem** | No | No | No | Default — app code only |
+| **emptyDir** | Yes | No | No | Scratch space, /tmp, inter-container sharing |
+| **hostPath** | Yes | Yes (if same node) | No | Node-level files (logs, Docker socket) |
+| **PersistentVolume** | Yes | Yes | Yes | Databases, monitoring data, any state that must survive |
+
+**emptyDir** is the simplest volume — it is an empty directory created fresh for every pod, lives on the node's local disk, and is deleted when the pod is deleted. AzureShop uses `emptyDir` for `/tmp` in all 8 services because Node.js needs a writable `/tmp` directory (for temporary files), but that data should NOT persist — it is purely throwaway scratch space.
+
+**PersistentVolume** is backed by real durable storage — a cloud disk, a network file share, or any storage system — and lives completely independently of pods.
+
+---
+
+### What is a PersistentVolume (PV)?
+
+A PersistentVolume is a **piece of storage in the cluster** that has been provisioned by an administrator (or automatically by Kubernetes). It is a cluster-level resource — not tied to any namespace, not tied to any pod. It is just a block of storage sitting there, waiting to be claimed.
+
+Think of a PV like a **parking space** in a car park. The car park (cluster) has many spaces of different sizes. The parking space exists independently of any car — it is just a space that can be reserved.
+
+A PV has four key properties:
+
+**1. Capacity**
+How much storage it provides:
+```yaml
+capacity:
+  storage: 20Gi    # 20 gigabytes of storage
+```
+
+**2. Access Mode**
+How the storage can be mounted — this is determined by the underlying storage technology:
+
+| Access Mode | Short form | Meaning | Supported by |
+|---|---|---|---|
+| `ReadWriteOnce` | RWO | Mounted read-write by ONE node at a time | Azure Disk, AWS EBS, GCE PD |
+| `ReadOnlyMany` | ROX | Mounted read-only by MANY nodes simultaneously | Azure File, NFS |
+| `ReadWriteMany` | RWX | Mounted read-write by MANY nodes simultaneously | Azure File, NFS, CephFS |
+| `ReadWriteOncePod` | RWOP | Mounted read-write by ONE specific pod | Azure Disk (newer) |
+
+**Azure Disk** (what AzureShop uses) only supports `ReadWriteOnce` — it can only be attached to one node at a time. This is a physical limitation of block storage devices. If you need a disk accessible from multiple pods on different nodes simultaneously, you need Azure File (which uses SMB/NFS protocol, like a network share).
+
+**3. Reclaim Policy**
+What happens to the PV when the PVC that claimed it is deleted:
+
+| Policy | What happens |
+|---|---|
+| `Retain` | PV stays with all data — admin must manually reclaim |
+| `Delete` | PV and the underlying storage (Azure Disk) are deleted |
+| `Recycle` | Deprecated — basic scrub and make available again |
+
+**4. StorageClass**
+Which type of storage backend created this PV. This is how Kubernetes knows to create an Azure Disk vs Azure File vs something else.
+
+```yaml
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: prometheus-data-pv
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: managed-csi
+  azureDisk:           # the actual Azure Disk that backs this PV
+    diskName: prometheus-data-disk
+    diskURI: /subscriptions/.../resourceGroups/.../providers/Microsoft.Compute/disks/prometheus-data-disk
+```
+
+In practice you almost never write a PV by hand like this. You use **dynamic provisioning** via StorageClass, which creates the PV automatically when needed.
+
+---
+
+### What is a PersistentVolumeClaim (PVC)?
+
+A PVC is a **request for storage** made by a pod (or more accurately, by the user on behalf of a pod). It is like a pod saying "I need 20Gi of ReadWriteOnce storage."
+
+Going back to the parking analogy: if the PV is a parking space, the PVC is the **parking permit** — a claim that says "I am reserving space number 42 for my car."
+
+The PVC specifies what it needs:
+```yaml
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: prometheus-data
+  namespace: monitoring
+spec:
+  accessModes:
+    - ReadWriteOnce       # I need a disk I can read-write
+  storageClassName: managed-csi  # I want an Azure Disk
+  resources:
+    requests:
+      storage: 20Gi       # I need 20 gigabytes
+```
+
+Kubernetes then finds a PV that satisfies all three requirements (access mode, storage class, size) and **binds** the PVC to that PV. Once bound, that PV is exclusively reserved for this PVC — no other PVC can claim it.
+
+The pod then mounts the PVC:
+```yaml
+spec:
+  containers:
+    - name: prometheus
+      volumeMounts:
+        - name: prometheus-storage
+          mountPath: /prometheus    # all data written here survives restarts
+  volumes:
+    - name: prometheus-storage
+      persistentVolumeClaim:
+        claimName: prometheus-data  # use the PVC we defined above
+```
+
+Now everything Prometheus writes to `/prometheus` goes onto the Azure Disk — and survives any number of pod restarts, node reboots, or AKS upgrades.
+
+---
+
+### The Binding Process — How PV and PVC Connect
+
+```
+1. You create a PVC: "I need 20Gi, ReadWriteOnce, managed-csi"
+
+2. Kubernetes PV controller searches for a matching PV:
+   → Is there a PV with storageClassName=managed-csi?
+   → Does it have ReadWriteOnce?
+   → Is its capacity >= 20Gi?
+   → Is it currently unbound (status=Available)?
+
+3a. If a matching PV exists (static provisioning):
+    → PV status changes from Available → Bound
+    → PVC status changes from Pending → Bound
+    → They are linked: PVC "prometheus-data" ↔ PV "prometheus-data-pv"
+
+3b. If NO matching PV exists (dynamic provisioning):
+    → StorageClass provisioner is called (azure-disk-csi-driver)
+    → It creates a new Azure Disk in Azure
+    → Creates a PV object representing that disk
+    → Binds the PV to the PVC
+    → PVC status goes Pending → Bound
+```
+
+Once bound, the pod can be scheduled and the volume mounted. If a PVC stays in `Pending` state, the pod also stays in `Pending` state — it cannot start without its storage.
+
+---
+
+### Static vs Dynamic Provisioning
+
+**Static Provisioning:** An administrator manually creates PV objects upfront. Pods claim them via PVCs. This was the original approach — tedious and hard to scale.
+
+```
+Admin creates PV → User creates PVC → Kubernetes binds them → Pod uses PVC
+```
+
+**Dynamic Provisioning:** You define a **StorageClass** that tells Kubernetes HOW to create storage automatically. When a PVC is created, Kubernetes calls the storage provider's CSI driver to provision a real disk/share on demand. The PV is created automatically — you never touch a PV object directly.
+
+```
+User creates PVC → StorageClass provisioner creates real disk → PV auto-created → Bound → Pod runs
+```
+
+Dynamic provisioning is the standard today. In AKS, the `managed-csi` StorageClass uses the Azure Disk CSI driver — when a PVC asks for `managed-csi` storage, the driver automatically creates an Azure Managed Disk in your resource group, creates a PV object, and binds it. You see the disk appear in your Azure portal.
+
+---
+
+### What is a StorageClass?
+
+A StorageClass is the **recipe** for creating storage dynamically. It defines:
+- **Provisioner:** which CSI driver to use (Azure Disk CSI, Azure File CSI, etc.)
+- **Parameters:** what type of disk (Premium_LRS, Standard_LRS, etc.), encryption, etc.
+- **ReclaimPolicy:** what to do with the disk when the PVC is deleted
+- **VolumeBindingMode:** when to create the disk (immediately vs wait until pod is scheduled)
+
+AKS ships with several built-in StorageClasses:
+
+| StorageClass | Provisioner | Disk type | Access modes |
+|---|---|---|---|
+| `managed-csi` | Azure Disk CSI | Standard SSD (LRS) | RWO only |
+| `managed-csi-premium` | Azure Disk CSI | Premium SSD (LRS) | RWO only |
+| `azurefile-csi` | Azure File CSI | Azure File Share | RWO, ROX, RWX |
+| `azurefile-csi-premium` | Azure File CSI | Premium Azure File | RWO, ROX, RWX |
+
+```bash
+# See all available StorageClasses in AKS
+kubectl get storageclass
+
+# Output:
+# NAME                     PROVISIONER                RECLAIMPOLICY   VOLUMEBINDINGMODE
+# managed-csi (default)    disk.csi.azure.com         Delete          WaitForFirstConsumer
+# managed-csi-premium      disk.csi.azure.com         Delete          WaitForFirstConsumer
+# azurefile-csi            file.csi.azure.com         Delete          Immediate
+# azurefile-csi-premium    file.csi.azure.com         Delete          Immediate
+```
+
+`WaitForFirstConsumer` is important for Azure Disk — the disk is only created when a pod actually tries to use the PVC, and it is created in the same **availability zone** as the node where the pod will run. Azure Disks are zone-pinned — a disk in zone 1 can only be attached to a node in zone 1. `WaitForFirstConsumer` ensures the disk and the node end up in the same zone.
+
+---
+
+### PV Lifecycle — The Full Journey
+
+```
+                        PersistentVolume Lifecycle
+                        ══════════════════════════
+
+  PROVISIONING
+  ┌─────────────┐
+  │  Available  │  PV exists, not yet claimed by any PVC
+  └──────┬──────┘
+         │ PVC created that matches this PV
+         ↓
+  BINDING
+  ┌─────────────┐
+  │   Bound     │  PV is reserved for this PVC. Pod can now use the PVC.
+  └──────┬──────┘
+         │ PVC is deleted
+         ↓
+  RECLAIMING
+  ┌─────────────┐    ReclaimPolicy=Retain
+  │  Released   │ ──────────────────────────→  Data preserved, admin must manually
+  └──────┬──────┘                               clean up and make PV available again
+         │ ReclaimPolicy=Delete
+         ↓
+  ┌─────────────┐
+  │   Deleted   │  Azure Disk is deleted. Data is gone permanently.
+  └─────────────┘
+```
+
+**Released state:** The PVC was deleted but the PV still exists. The data is still there. However, Kubernetes will NOT rebind this PV to a new PVC automatically — it remembers which PVC owned it and protects the data from accidental reuse. An admin must manually clean the PV's `claimRef` to make it Available again (for Retain policy), or the disk is deleted (for Delete policy).
+
+---
+
+### Azure Disk vs Azure File — When to Use Which
+
+In AKS you have two main storage options, and choosing the wrong one is a common mistake:
+
+| | Azure Disk (`managed-csi`) | Azure File (`azurefile-csi`) |
+|---|---|---|
+| **Protocol** | Block storage (like a local disk) | SMB / NFS (like a network share) |
+| **Access mode** | ReadWriteOnce only | ReadWriteMany (multiple pods) |
+| **Performance** | High (low latency, high IOPS) | Lower (network overhead) |
+| **Zone** | Zone-pinned (disk + node must match) | Zone-redundant available |
+| **Shared access** | No — one node at a time | Yes — many pods on many nodes |
+| **Use cases** | Databases, Prometheus, single-writer apps | Shared config, multiple readers, legacy apps |
+| **Cost** | Lower (per GB) | Higher |
+| **In AzureShop** | Prometheus (20Gi), Grafana (5Gi), Alertmanager (2Gi) | Not used |
+
+**Choose Azure Disk when:** You have one pod writing to the volume (database, monitoring). You need maximum IOPS and low latency.
+
+**Choose Azure File when:** Multiple pods across multiple nodes need to read or write the same files simultaneously. Example: a shared configuration directory that 10 pods all need to read.
+
+---
+
+### PVs and PVCs in AzureShop — Exact Implementation
+
+AzureShop's application services (user-service, product-service, etc.) are stateless — they store all state in Azure SQL Database. They use **no PVCs**. Instead they use `emptyDir` volumes for `/tmp`.
+
+The only components in AzureShop that use PVCs are the **monitoring stack** (Prometheus, Grafana, Alertmanager), deployed via the `kube-prometheus-stack` Helm chart.
+
+File: `helm/values/kube-prometheus-stack.yaml`
+
+#### Prometheus — 20Gi Azure Disk
+
+```yaml
+prometheus:
+  prometheusSpec:
+    retention: 15d           # keep 15 days of metrics on disk
+
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi     # Azure Disk
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 20Gi
+```
+
+What this means in practice:
+- When `kube-prometheus-stack` is installed, it creates a PVC named `prometheus-kube-prometheus-stack-prometheus-db-0`
+- The Azure Disk CSI driver provisions a 20Gi Azure Managed Disk in the AKS resource group
+- Prometheus mounts this disk at `/prometheus` inside the pod
+- All metrics data (scraped from 8 services every 15 seconds) is written here
+- If the Prometheus pod is restarted (node drain, AKS upgrade, pod crash), it comes back and reads ALL its historical data from the disk — the 15-day window is preserved
+
+#### Grafana — 5Gi Azure Disk
+
+```yaml
+grafana:
+  persistence:
+    enabled: true
+    storageClassName: managed-csi     # Azure Disk
+    size: 5Gi
+```
+
+- Grafana stores its SQLite database on this disk: saved dashboards, user accounts, alert rules configured via the UI, panel edits
+- Without persistence, every Grafana restart loses all UI customisations
+- The pre-loaded AzureShop dashboard (from the ConfigMap) survives without the disk, but any changes made in the UI would not
+
+#### Alertmanager — 2Gi Azure Disk
+
+```yaml
+alertmanager:
+  alertmanagerSpec:
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 2Gi
+```
+
+- Alertmanager stores its **silence state** and **notification deduplication log** on disk
+- If Alertmanager restarts without persistence, it forgets all configured silences and could re-fire already-sent alerts
+
+#### Application Services — emptyDir (NOT PVC)
+
+```yaml
+# helm/charts/user-service/templates/deployment.yaml
+volumes:
+  - name: tmp
+    emptyDir: {}     # temporary, cleared on pod restart — NOT a PVC
+
+volumeMounts:
+  - name: tmp
+    mountPath: /tmp  # Node.js can write temp files here
+```
+
+Why `emptyDir` and not a PVC for application services?
+- Application state lives in **Azure SQL** — the database persists data, not the pod
+- `/tmp` is used for truly temporary files (multipart uploads, temp processing) — no value in persisting these
+- PVCs cost money and add scheduling constraints (zone pinning)
+- Stateless services should never need persistent local storage — if they do, that is usually a design smell
+
+---
+
+### StatefulSets and PVCs — The Right Tool for Databases
+
+If you ever deploy a database directly inside Kubernetes (instead of using Azure SQL), you would use a **StatefulSet** instead of a Deployment, with **volumeClaimTemplates**.
+
+A StatefulSet is a special controller designed for stateful workloads. Unlike a Deployment (where all pods are interchangeable and get random names), a StatefulSet:
+- Gives each pod a **stable, predictable name**: `postgres-0`, `postgres-1`, `postgres-2`
+- Gives each pod its **own PVC**: `data-postgres-0`, `data-postgres-1`, `data-postgres-2`
+- Starts and stops pods **in order** (not all at once)
+- When a pod is replaced, the new pod gets the **same name and same PVC** as the old one
+
+```yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  replicas: 3
+  serviceName: postgres          # headless service — each pod gets its own DNS
+  template:
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:          # each pod gets its own PVC automatically
+    - metadata:
+        name: data
+      spec:
+        storageClassName: managed-csi-premium   # Premium SSD for database IOPS
+        accessModes: [ReadWriteOnce]
+        resources:
+          requests:
+            storage: 50Gi
+```
+
+This creates:
+- `postgres-0` pod → `data-postgres-0` PVC → 50Gi Azure Premium Disk
+- `postgres-1` pod → `data-postgres-1` PVC → 50Gi Azure Premium Disk
+- `postgres-2` pod → `data-postgres-2` PVC → 50Gi Azure Premium Disk
+
+If `postgres-1` crashes, Kubernetes creates a new `postgres-1` pod and mounts the existing `data-postgres-1` PVC — the new pod starts with all the data the old one had.
+
+AzureShop uses **Azure SQL** instead of a PostgreSQL StatefulSet — the database is managed by Azure, not by Kubernetes. This is the recommended approach for production — managed cloud databases are simpler to operate than running a database inside Kubernetes.
+
+---
+
+### PVC Expansion — Growing a Volume
+
+What if your Prometheus disk fills up and you need more space? Most StorageClasses support online volume expansion — you just edit the PVC and increase the size:
+
+```bash
+kubectl patch pvc prometheus-data -n monitoring \
+  -p '{"spec":{"resources":{"requests":{"storage":"40Gi"}}}}'
+```
+
+The CSI driver expands the underlying Azure Disk from 20Gi to 40Gi. In most cases this happens without restarting the pod. The filesystem inside the pod automatically sees the extra space.
+
+**You can only EXPAND, never shrink.** Kubernetes does not allow reducing a PVC's storage request — reducing a disk risks data corruption.
+
+---
+
+### Complete Picture — Volume Types in AzureShop
+
+```
+AzureShop Kubernetes Cluster
+══════════════════════════════════════════════════════
+
+  Application Services (user-service, product-service, etc.)
+  ─────────────────────────────────────────────────────────
+  Volume type: emptyDir
+  Mount: /tmp
+  Data: None — all state in Azure SQL (external)
+  Survives pod restart: No (intentional — /tmp is scratch only)
+
+  Monitoring Stack (namespace: monitoring)
+  ─────────────────────────────────────────────────────────
+  Prometheus pod
+    └── PVC: 20Gi, managed-csi (Azure Disk, RWO)
+        Mount: /prometheus
+        Data: 15 days of scraped metrics from all 8 services
+        Survives pod restart: YES
+
+  Grafana pod
+    └── PVC: 5Gi, managed-csi (Azure Disk, RWO)
+        Mount: /var/lib/grafana
+        Data: SQLite db, saved dashboards, user sessions
+        Survives pod restart: YES
+
+  Alertmanager pod
+    └── PVC: 2Gi, managed-csi (Azure Disk, RWO)
+        Mount: /alertmanager
+        Data: silence config, deduplication log
+        Survives pod restart: YES
+
+  Azure (external to cluster)
+  ─────────────────────────────────────────────────────────
+  Azure SQL Database
+    Data: all application data (users, products, orders, etc.)
+    Managed by Azure — not a Kubernetes PV at all
+```
+
+---
+
+### Common Mistakes With PVs and PVCs
+
+**Mistake 1: Wrong access mode for multi-pod access**
+```yaml
+accessModes:
+  - ReadWriteOnce    # only one NODE can mount this at a time
+```
+If you have 3 Prometheus replicas on 3 different nodes all trying to mount the same `ReadWriteOnce` PVC, 2 of them will fail. RWO means one node — if you need multiple pods to share storage, use Azure File (`ReadWriteMany`).
+
+**Mistake 2: No storage class specified**
+```yaml
+spec:
+  resources:
+    requests:
+      storage: 10Gi
+  # no storageClassName!
+```
+Without `storageClassName`, Kubernetes uses the cluster's **default** StorageClass. In AKS this is `managed-csi`. This usually works but it is better to be explicit — specify the StorageClass so you know exactly what you get.
+
+**Mistake 3: PVC in wrong namespace**
+A PVC lives in a specific namespace. A pod in namespace `dev` cannot use a PVC from namespace `monitoring`. PVs are cluster-scoped (no namespace) but PVCs are namespace-scoped.
+
+**Mistake 4: Deleting a PVC while the pod is running**
+Kubernetes has a feature called **PVC Protection** — it prevents deletion of a PVC that is currently mounted by a running pod. The PVC enters `Terminating` state but the actual deletion is blocked until the pod is deleted. This prevents data loss from accidental PVC deletion.
+
+**Mistake 5: Forgetting `ignore_changes` for PVCs in Terraform**
+Similar to the Cluster Autoscaler's `node_count`, if Terraform manages a StatefulSet with PVCs, re-running `terraform apply` might try to recreate PVCs — which would destroy data. Always be careful about PVC lifecycle management in Terraform.
+
+---
+
+### Interview Prep
+
+1. **What is a PersistentVolume in Kubernetes?** — A PersistentVolume is a piece of storage provisioned in the cluster that exists independently of any pod. It is a cluster-level resource backed by real durable storage — an Azure Disk, Azure File share, NFS mount, or other storage system. It has a capacity, access mode, and reclaim policy. A PV outlives the pod that used it — when the pod is deleted, the PV and its data survive. Pods never use a PV directly; they use a PVC to claim it.
+
+2. **What is a PersistentVolumeClaim and how does it relate to a PV?** — A PVC is a request for storage from a pod. The pod says "I need 20Gi, ReadWriteOnce, of type managed-csi." Kubernetes finds a PV that satisfies those requirements and binds them together — the PV is exclusively reserved for that PVC. The pod mounts the PVC, not the PV directly. The relationship: PV = the actual storage that exists. PVC = the reservation/claim on that storage. Pod uses the PVC. This separation means you can change the underlying storage without changing the pod spec.
+
+3. **What is dynamic provisioning and how does it work?** — Dynamic provisioning means Kubernetes automatically creates the storage when a PVC is created — you never manually create PV objects. You specify a `storageClassName` in the PVC. Kubernetes calls the corresponding CSI driver (e.g., Azure Disk CSI driver for `managed-csi`). The driver creates the actual Azure Disk in your Azure subscription, creates a PV object representing it, and binds the PVC to the PV. The whole process takes seconds. Without dynamic provisioning, an admin would have to manually create a disk and a PV object for every PVC — not scalable.
+
+4. **What is a StorageClass?** — A StorageClass is the template Kubernetes uses to dynamically create storage. It defines which CSI driver to use (provisioner), what parameters to pass (disk type, replication, encryption), the reclaim policy (Delete or Retain), and the volume binding mode (Immediate or WaitForFirstConsumer). In AKS, `managed-csi` uses the Azure Disk CSI driver with Standard SSD and Delete reclaim policy. When a PVC references `managed-csi`, a Standard SSD Azure Disk is automatically created.
+
+5. **What is the difference between ReadWriteOnce and ReadWriteMany?** — ReadWriteOnce (RWO) means the volume can be mounted read-write by only ONE node at a time. Azure Disks support only RWO — this is a physical limitation of block storage. ReadWriteMany (RWX) means the volume can be mounted read-write by MANY nodes simultaneously. Azure File shares support RWX — they are network shares accessed over SMB/NFS. Use Azure Disk (RWO) for databases and single-writer workloads where you need maximum performance. Use Azure File (RWX) when multiple pods across multiple nodes need shared access to the same files.
+
+6. **What is the difference between emptyDir and a PersistentVolumeClaim?** — An `emptyDir` is a temporary directory created fresh for each pod on the node's local disk. It survives container restarts within the same pod but is **deleted when the pod is deleted**. It stores nothing permanently. A PVC is backed by real durable storage (an Azure Disk) that survives pod deletion, node failure, and AKS upgrades. In AzureShop, application services use `emptyDir` for `/tmp` (scratch space — no value in persisting) while Prometheus uses a PVC (metrics history must survive restarts). The rule: use emptyDir for truly throwaway data, use PVC for anything that must survive a pod restart.
+
+7. **Why do AzureShop's application services (user-service, etc.) use emptyDir instead of PVCs?** — Because application services are stateless — all durable state (user records, orders, products) is stored in Azure SQL, which is external to Kubernetes. The `/tmp` directory used by Node.js is purely for temporary processing — files that are meaningless after the request completes. Using a PVC for `/tmp` would cost money, add zone-pinning constraints (the pod must always run on a node in the same zone as its Azure Disk), and provide zero benefit since the data is intentionally throwaway. Only stateful workloads need PVCs.
+
+8. **What is a StatefulSet and when do you use it with PVCs?** — A StatefulSet is a Kubernetes controller for stateful applications that need stable identity and dedicated storage. Unlike Deployments (where pods are interchangeable), StatefulSet pods have predictable names (`postgres-0`, `postgres-1`) and each get their own PVC via `volumeClaimTemplates`. When a StatefulSet pod is replaced, the new pod gets the same name and mounts the same PVC — preserving all its data. Use StatefulSet when running databases or other stateful apps inside Kubernetes. AzureShop uses Azure SQL instead of a Kubernetes StatefulSet for its database — managed cloud databases are simpler and more reliable than managing a database StatefulSet yourself.
