@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File), Kubernetes Ingress (Ingress resource vs Ingress Controller, NGINX Ingress, path-based routing, TLS termination, canary deployments, how AzureShop routes traffic through Application Gateway → NGINX → api-gateway → services).
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File), Kubernetes Ingress (Ingress resource vs Ingress Controller, NGINX Ingress, path-based routing, TLS termination, canary deployments, how AzureShop routes traffic through Application Gateway → NGINX → api-gateway → services), Full Kubernetes Architecture (Control Plane components: API Server, etcd, Scheduler, Controller Manager, Cloud Controller Manager — Worker Node components: kubelet, kube-proxy, Container Runtime, Pods — end-to-end flow of kubectl apply, AzureShop AKS architecture mapping).
 
 ---
 
@@ -36,6 +36,7 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 27. [How Does Autoscaling Work in Kubernetes? Explain HPA, VPA, Cluster Autoscaler, and KEDA with How Services Fit In](#q27-how-does-autoscaling-work-in-kubernetes-explain-hpa-vpa-cluster-autoscaler-and-keda-with-how-services-fit-in)
 28. [What is a Persistent Volume and a Persistent Volume Claim in Kubernetes?](#q28-what-is-a-persistent-volume-and-a-persistent-volume-claim-in-kubernetes)
 29. [What is Kubernetes Ingress? How Does it Work, and How is it Used in AzureShop?](#q29-what-is-kubernetes-ingress-how-does-it-work-and-how-is-it-used-in-azureshop)
+30. [What is the Full Architecture of Kubernetes? Explain Every Master Node and Worker Node Component in Detail](#q30-what-is-the-full-architecture-of-kubernetes-explain-every-master-node-and-worker-node-component-in-detail)
 
 ---
 
@@ -6622,3 +6623,589 @@ The one service that uses `type: LoadBalancer` in AzureShop is the NGINX Ingress
 7. **Why does AzureShop use two layers of NGINX — the NGINX Ingress Controller and the api-gateway?** — They serve different purposes at different layers. The NGINX Ingress Controller handles Kubernetes-level routing: receives traffic from the internet, routes `/api/*` to api-gateway and `/` to frontend, handles canary deployments and TLS. The api-gateway is an application-level router: it receives all API traffic and further routes `/api/users/` to user-service, `/api/products/` to product-service, etc., while also applying per-service rate limits and auth handling. Separating them keeps each layer simple and independently configurable.
 
 8. **How does NetworkPolicy interact with Ingress in AzureShop?** — AzureShop uses zero-trust NetworkPolicy — by default all pod-to-pod traffic is blocked. The NetworkPolicy on each service pod has an `ingress.from` rule that explicitly allows traffic from the `ingress-nginx` namespace (where the NGINX controller pods run) and from the `dev` namespace (for service-to-service calls). Without this rule, even if the Ingress correctly routes a request to user-service, the NetworkPolicy would drop the packet silently at the pod level and the request would fail. Ingress and NetworkPolicy work together: Ingress handles L7 routing, NetworkPolicy handles L3/L4 enforcement.
+
+---
+
+## Q30. What is the Full Architecture of Kubernetes? Explain Every Master Node and Worker Node Component in Detail
+
+### The Big Picture — Think of Kubernetes as a Smart Company
+
+Imagine you own a company that delivers packages. You have:
+
+- A **Head Office** — where all the managers sit, make decisions, keep records, and give orders
+- Multiple **Warehouses** — where the actual workers are, physically packing and shipping packages
+
+Kubernetes works exactly the same way:
+
+- The **Control Plane (Master Node)** = Head Office — the brain, makes all decisions
+- The **Worker Nodes** = Warehouses — where your actual application containers run
+
+You (the developer) talk to the Head Office. The Head Office talks to the Warehouses. You never talk to the Warehouses directly.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     KUBERNETES CLUSTER                          │
+│                                                                 │
+│  ┌──────────────────────────────────┐                          │
+│  │    CONTROL PLANE (Master Node)   │  ← The Brain / Head      │
+│  │                                  │    Office                │
+│  │  API Server  │  etcd             │                          │
+│  │  Scheduler   │  Controller Mgr   │                          │
+│  │  Cloud Controller Manager        │                          │
+│  └──────────────┬───────────────────┘                          │
+│                 │  (gives instructions)                        │
+│        ┌────────┼────────┐                                     │
+│        ↓        ↓        ↓                                     │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐                       │
+│  │  Worker  │ │  Worker  │ │  Worker  │  ← The Warehouses /   │
+│  │  Node 1  │ │  Node 2  │ │  Node 3  │    where apps run     │
+│  │          │ │          │ │          │                       │
+│  │ kubelet  │ │ kubelet  │ │ kubelet  │                       │
+│  │kube-proxy│ │kube-proxy│ │kube-proxy│                       │
+│  │ runtime  │ │ runtime  │ │ runtime  │                       │
+│  │  [pods]  │ │  [pods]  │ │  [pods]  │                       │
+│  └──────────┘ └──────────┘ └──────────┘                       │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+### Part 1 — Control Plane Components (The Head Office)
+
+The Control Plane is the management layer. In AKS (Azure Kubernetes Service), Microsoft manages this for you — you never SSH into the master node. It has 5 key components.
+
+---
+
+#### Component 1 — API Server (`kube-apiserver`)
+
+**What it is in simple English:**
+The API Server is the **front door of Kubernetes**. Every single thing that happens in a Kubernetes cluster goes through the API Server. No exceptions. When you run `kubectl apply`, you are sending a request to the API Server. When a worker node reports its status, it sends it to the API Server. When the Scheduler decides where to place a pod, it writes the decision through the API Server. Everything flows through it.
+
+**Real-life analogy:**
+Think of the API Server as the **receptionist at a large hospital**. Every doctor, nurse, patient, and visitor must check in at reception. The receptionist decides if you are allowed in, logs your visit, and directs you to the right department. Nobody can walk straight into the operating room — they must go through reception first.
+
+**What it actually does:**
+- Receives all requests (from `kubectl`, from other components, from worker nodes)
+- Authenticates the request — "Are you who you say you are?" (checks certificates, tokens)
+- Authorizes the request — "Are you allowed to do this?" (checks RBAC rules)
+- Validates the request — "Is this YAML correct? Are the fields valid?"
+- Saves the result to etcd
+- Notifies other components that something changed
+
+**In AzureShop:**
+When you run:
+```bash
+kubectl apply -f helm/charts/user-service/templates/deployment.yaml
+```
+kubectl sends a REST API call (HTTP POST) to the API Server's endpoint. The API Server checks your kubeconfig credentials, confirms you are allowed to create Deployments in the `dev` namespace, validates the YAML structure, and saves the new Deployment object to etcd. The Scheduler then sees the new pods that need to be placed, and the process begins.
+
+```
+You (kubectl) ──────→ API Server ──────→ etcd (saves it)
+                           ↑
+                    validates + authenticates
+                           ↓
+                    notifies Scheduler + Controller Manager
+```
+
+---
+
+#### Component 2 — etcd
+
+**What it is in simple English:**
+etcd is the **database of Kubernetes**. It is the only place where the entire state of your cluster is stored. Every Deployment you created, every Pod, every ConfigMap, every Secret, every node, every event — all of it lives in etcd. If you lose etcd without a backup, your entire cluster configuration is gone.
+
+**Real-life analogy:**
+Think of etcd as the **company's filing cabinet** — but a very special one. It is fireproof, it keeps a record of every change ever made (with timestamps), and if two people try to update the same file at the same time, it handles the conflict safely. Every department in the company (Head Office) reads from and writes to this one filing cabinet. Nothing is stored in anyone's memory — everything is always written to the filing cabinet first.
+
+**Key facts about etcd:**
+- It is a **key-value store** — data is stored like a dictionary: `key → value`
+  - Example: `/registry/deployments/dev/user-service → {full YAML}`
+- It uses the **Raft consensus algorithm** — if you run 3 etcd instances (for high availability), they vote on every write. A majority must agree before a write is accepted. This means no split-brain scenarios.
+- Only the API Server talks to etcd directly. No other component reads/writes etcd. Everything goes through the API Server.
+- **In AKS**, etcd is managed and backed up automatically by Microsoft. You never touch it.
+
+**What gets stored in etcd:**
+```
+/registry/pods/dev/user-service-7d4f9b-abc12          → pod spec + status
+/registry/deployments/dev/user-service                 → deployment spec
+/registry/services/dev/user-service                    → service spec
+/registry/configmaps/dev/user-service-config           → configmap data
+/registry/secrets/dev/user-service-secrets             → encrypted secret data
+/registry/nodes/aks-workerpool-12345                   → node info + status
+```
+
+**Why it matters:**
+If the API Server crashes and restarts, it reads from etcd and immediately knows everything about the cluster. The cluster does not lose its memory. This is why etcd backup is critical in self-managed clusters.
+
+---
+
+#### Component 3 — Scheduler (`kube-scheduler`)
+
+**What it is in simple English:**
+The Scheduler is the **component that decides which Worker Node a new Pod should run on**. When you create a Deployment with 3 replicas, the Scheduler looks at all your worker nodes and picks the best one for each pod. It does not actually start the pod — it just makes the placement decision and writes it to etcd via the API Server. The actual starting is done by the kubelet on the chosen node.
+
+**Real-life analogy:**
+Think of the Scheduler as the **hotel booking manager**. When a guest arrives (a new pod needs to run), the booking manager checks:
+- Which rooms (nodes) have space available?
+- Does the guest need a sea view room (the pod needs a GPU node)?
+- Is any room on maintenance (node is under pressure/tainted)?
+- Can we keep this guest near their colleague (pod affinity — keep pods on the same node)?
+- Should we spread guests across floors (pod anti-affinity — spread replicas across nodes)?
+
+The booking manager then assigns the guest to the best available room. The manager does not carry the luggage (that's the kubelet's job).
+
+**How the Scheduler makes its decision — step by step:**
+
+1. **Filtering** — Remove all nodes that CANNOT run this pod:
+   - Not enough CPU or memory
+   - Node is tainted and pod does not tolerate it
+   - Pod requests a specific node (nodeSelector/nodeAffinity)
+   - Node is not Ready
+
+2. **Scoring** — Rank the remaining nodes:
+   - Prefer nodes with more free resources (spread the load)
+   - Prefer nodes that already have the container image (faster start)
+   - Prefer nodes that match affinity rules
+
+3. **Binding** — Write the decision: "Pod X goes to Node Y"
+
+```
+New Pod created (no node assigned yet)
+        ↓
+Scheduler sees it (watches API Server)
+        ↓
+Filter: which nodes can run this pod?
+  Node 1: 2 CPUs free ✅
+  Node 2: 0.1 CPU free ❌ (not enough)
+  Node 3: 2 CPUs free ✅
+        ↓
+Score: which is best?
+  Node 1: score 75 (less free memory)
+  Node 3: score 90 (more balanced)
+        ↓
+Bind: Pod → Node 3
+(written to etcd via API Server)
+        ↓
+kubelet on Node 3 sees it and starts the container
+```
+
+**In AzureShop:**
+AzureShop has two node pools — a system pool and a user/workload pool. The Scheduler respects taints on the system pool (`CriticalAddonsOnly=true:NoSchedule`) so that application pods like `user-service` are never placed on system nodes. Only system pods (CoreDNS, metrics-server) can tolerate the system pool taint.
+
+---
+
+#### Component 4 — Controller Manager (`kube-controller-manager`)
+
+**What it is in simple English:**
+The Controller Manager is a **single process that runs dozens of individual controllers** — each one is responsible for watching one type of Kubernetes object and making sure reality matches the desired state. It is the "make it so" engine of Kubernetes. You declare what you want (3 replicas of user-service), and the Controller Manager works tirelessly to make it happen and keep it that way.
+
+**Real-life analogy:**
+Think of the Controller Manager as a **building supervisor who walks around with a checklist every 30 seconds**. The checklist says:
+- "Meeting room A should have 4 chairs" → walks in, counts 3 chairs → goes and gets another chair
+- "Fire exit should be clear" → walks by, sees a box blocking it → moves the box
+- "Parking lot should have 10 reserved spaces" → counts 8 → marks 2 more
+
+The supervisor never stops. Every 30 seconds they walk the whole building, compare reality to the plan, and fix any difference. This is called the **Reconciliation Loop**.
+
+**Controllers inside the Controller Manager:**
+
+| Controller | What it watches | What it does |
+|---|---|---|
+| **Deployment Controller** | Deployment objects | Creates/manages ReplicaSets when you create a Deployment |
+| **ReplicaSet Controller** | ReplicaSet objects | Creates/deletes pods to match the desired replica count |
+| **Node Controller** | Node status | Marks nodes as NotReady if they stop sending heartbeats; evicts pods from dead nodes |
+| **Job Controller** | Job objects | Creates pods for batch jobs; marks job complete when pods finish |
+| **CronJob Controller** | CronJob objects | Creates Job objects at the scheduled time |
+| **Endpoints Controller** | Services + Pods | Updates the Endpoints object with the IP addresses of healthy pods behind a Service |
+| **Namespace Controller** | Namespace deletion | Cleans up all resources inside a namespace when it is deleted |
+| **ServiceAccount Controller** | Namespaces | Creates a default ServiceAccount in every new namespace |
+
+**How the ReplicaSet Controller works (most common example):**
+
+```
+Desired state (in etcd):  user-service replicas = 3
+Actual state (in etcd):   user-service pods running = 2  (one crashed)
+
+ReplicaSet Controller sees the difference:
+  desired=3, actual=2 → gap of 1
+
+Action: creates 1 new pod spec in etcd
+
+Scheduler picks up the new pod → assigns it to a node
+kubelet on that node → starts the container
+
+Now actual=3 → desired=3 → no action needed
+```
+
+This loop runs continuously. It is why Kubernetes is "self-healing" — not magic, just a very diligent supervisor.
+
+---
+
+#### Component 5 — Cloud Controller Manager
+
+**What it is in simple English:**
+The Cloud Controller Manager is the **bridge between Kubernetes and the cloud provider** (in our case, Azure). Kubernetes itself does not know about Azure Load Balancers, Azure Disks, or Azure Virtual Networks. The Cloud Controller Manager speaks "Azure" and handles all the cloud-specific actions on Kubernetes's behalf.
+
+**Real-life analogy:**
+Think of it as the **company's procurement department**. When your office needs a new delivery van (a LoadBalancer Service), the procurement department calls the rental company (Azure), orders the van, and gives you the keys. When you no longer need the van, procurement calls Azure and returns it. The rest of the company does not need to know how to deal with the rental company — procurement handles all of that.
+
+**What it manages:**
+
+- **Node Controller** (cloud flavour) — When a node VM is deleted in Azure, it removes that node from the Kubernetes cluster. When a new VM is added, it registers it as a new node.
+- **Route Controller** — Sets up network routes in the Azure VNet so pods on different nodes can talk to each other.
+- **Service Controller** — When you create a `type: LoadBalancer` Service in Kubernetes, it calls the Azure API to provision an Azure Load Balancer with a public IP, and wires it to your pods. When you delete the Service, it deletes the Azure Load Balancer too.
+- **Volume Controller** — When you create a PersistentVolumeClaim using Azure Disk storage class, it calls the Azure API to create an Azure Managed Disk and attach it to the right node.
+
+```
+Kubernetes says: "I need a LoadBalancer for nginx-ingress"
+        ↓
+Cloud Controller Manager receives the request
+        ↓
+Calls Azure REST API:
+  - Create Azure Load Balancer
+  - Assign public IP: 20.91.45.123
+  - Configure health probes
+  - Set backend pool to nginx-ingress pod IPs
+        ↓
+Writes public IP back to Service object in etcd
+        ↓
+kubectl get svc nginx-ingress → EXTERNAL-IP: 20.91.45.123
+```
+
+**In AKS:**
+AKS ships with the Azure Cloud Controller Manager already configured. You get LoadBalancer Services, Azure Disk PVCs, and automatic node registration without any setup. It is one of the main reasons AKS is easier than managing Kubernetes yourself.
+
+---
+
+### Part 2 — Worker Node Components (The Warehouses)
+
+Worker Nodes are the machines where your actual application containers run. Each worker node has 3 core components that are always present.
+
+---
+
+#### Component 6 — kubelet
+
+**What it is in simple English:**
+The kubelet is the **on-site manager (agent) that runs on every worker node**. Its only job is to make sure the containers the Control Plane tells it to run are actually running. It watches for pod assignments (pods that have been scheduled to its node), starts the containers, watches their health, and reports back to the API Server.
+
+**Real-life analogy:**
+Think of the kubelet as the **warehouse floor manager**. The Head Office (Control Plane) sends an instruction: "Pack and ship 3 boxes of product A." The floor manager reads the instruction, tells the workers (Container Runtime) to start packing, checks that they are doing it correctly (liveness probes), and sends a status report back to Head Office every few seconds. If a worker falls sick (container crashes), the floor manager immediately reports it and starts a replacement.
+
+**What kubelet does step by step:**
+
+1. **Watches the API Server** for pods that have been assigned to its node
+2. **Pulls the container image** from the registry (ACR in AzureShop) if not already present
+3. **Calls the Container Runtime** (containerd) to actually start the container
+4. **Runs health checks** (liveness and readiness probes) and restarts containers that fail
+5. **Mounts volumes** — connects ConfigMaps, Secrets, PVCs, and Azure Key Vault CSI mounts to the container
+6. **Reports pod status** back to the API Server every few seconds: Running, CrashLoopBackOff, Pending, etc.
+7. **Enforces resource limits** — kills a container if it tries to use more memory than its limit
+
+**What kubelet does NOT do:**
+- It does not manage networking between pods (that is kube-proxy)
+- It does not decide which node a pod goes to (that is the Scheduler)
+- It does not create pods on its own — it only runs pods that are assigned to its node by the Scheduler
+
+```
+API Server: "Node 2, please run pod user-service-7d4f9b"
+        ↓
+kubelet on Node 2 sees the assignment
+        ↓
+kubelet: "pull image acrazureshopdev.azurecr.io/user-service:v1.0.0"
+  → Container Runtime pulls image from ACR ✅
+        ↓
+kubelet: "start the container with these env vars and volume mounts"
+  → Container Runtime starts container ✅
+        ↓
+kubelet runs liveness probe (HTTP GET /health every 10s)
+  → probe passes ✅
+        ↓
+kubelet reports to API Server: pod user-service-7d4f9b → Running
+```
+
+**In AzureShop:**
+The kubelet on each AKS worker node is configured to use the Workload Identity webhook (an admission webhook that injects the Azure token into pods), the CSI Driver (to mount Key Vault secrets as files), and the ACR pull identity (to pull images without passwords). You never see these directly — AKS sets them up for you.
+
+---
+
+#### Component 7 — kube-proxy
+
+**What it is in simple English:**
+kube-proxy is the **networking rules engine on every worker node**. When you create a Kubernetes Service (like `user-service` with ClusterIP `10.0.12.5`), kube-proxy is what makes traffic to that IP actually reach the right pods. It programs the node's networking rules so that when anything tries to connect to `10.0.12.5:3001`, the traffic is transparently redirected to one of the healthy pods behind that Service.
+
+**Real-life analogy:**
+Think of kube-proxy as the **telephone exchange operator** in an old office building. There is one central phone number for the "Sales Department" (the Service ClusterIP). When someone dials that number, the telephone exchange operator looks at who is currently available in Sales (which pods are healthy) and connects the call to one of them. If one Sales person is on lunch break (pod is not ready), the operator skips them and connects to someone who is available. The caller never knows or cares which specific person answered.
+
+**How kube-proxy works technically:**
+
+kube-proxy does NOT actually sit in the network path and proxy traffic in modern Kubernetes. That would be too slow. Instead it programs **iptables rules** (or IPVS rules) on the node's Linux kernel that do the redirection at the kernel level — which is extremely fast.
+
+```
+iptables rules created by kube-proxy on every node:
+
+-A KUBE-SERVICES -d 10.0.12.5/32 -p tcp --dport 3001 \
+   -j KUBE-SVC-USER-SERVICE
+
+-A KUBE-SVC-USER-SERVICE -j KUBE-SEP-POD1  (probability 0.33)
+-A KUBE-SVC-USER-SERVICE -j KUBE-SEP-POD2  (probability 0.50)
+-A KUBE-SVC-USER-SERVICE -j KUBE-SEP-POD3  (probability 1.0)
+
+-A KUBE-SEP-POD1 -j DNAT --to-destination 10.240.0.7:3001
+-A KUBE-SEP-POD2 -j DNAT --to-destination 10.240.0.8:3001
+-A KUBE-SEP-POD3 -j DNAT --to-destination 10.240.0.9:3001
+```
+
+This means: any traffic going to `10.0.12.5:3001` gets randomly redirected (DNAT) to one of the three pod IPs at the kernel level before the packet even leaves the network card.
+
+**What kube-proxy watches:**
+kube-proxy watches the API Server for changes to `Service` and `Endpoints` objects. When a pod crashes and is removed from Endpoints, kube-proxy immediately updates the iptables rules so no more traffic goes to the dead pod's IP.
+
+**In AzureShop:**
+When `api-gateway` calls `user-service:3001` (using the DNS name, not IP), CoreDNS resolves it to `10.0.12.5`. kube-proxy's iptables rules then redirect that to one of the live `user-service` pods. This happens on every node in the cluster. Even if `api-gateway` is on Node 1 and the `user-service` pod is on Node 3, iptables routes the packet across the node boundary transparently.
+
+---
+
+#### Component 8 — Container Runtime (containerd)
+
+**What it is in simple English:**
+The Container Runtime is the **actual software that runs containers**. It is the lowest level component — everything above it (kubelet, kube-proxy, Scheduler) manages and orchestrates, but the Container Runtime is the one that actually:
+- Downloads the container image from the registry
+- Creates the container's isolated filesystem
+- Starts the container process
+- Stops and deletes the container when asked
+
+**Real-life analogy:**
+Think of the Container Runtime as the **actual factory workers on the warehouse floor**. The floor manager (kubelet) gives instructions: "Start production line 7 for product A, using blueprint version 2.1." The workers (container runtime) go and do it — they get the raw materials (pull the image), set up the production line (create the container), start the machines (run the process), and shut it down when told.
+
+**Evolution of container runtimes:**
+- **Docker** — was the original runtime. Kubernetes used Docker via a component called `dockershim`. Docker was removed in Kubernetes 1.24 because it was too heavy and included too many developer tools that a cluster does not need.
+- **containerd** — is what AKS uses today. It is lightweight, fast, and does only what a cluster needs: pull images, run containers, manage their lifecycle. It is actually what Docker itself uses under the hood.
+- **CRI-O** — another lightweight runtime, popular with Red Hat OpenShift.
+
+**How it fits in the chain:**
+```
+kubelet (decides WHAT to run)
+    ↓
+  calls CRI (Container Runtime Interface) API
+    ↓
+containerd (actually runs the container)
+    ↓
+  calls OCI (Open Container Initiative) API
+    ↓
+runc (the Linux-level tool that creates the isolated process)
+    ↓
+Your container is now running
+```
+
+**In AzureShop:**
+AKS nodes run containerd. When kubelet tells containerd to start `user-service`, containerd:
+1. Checks if the image `acrazureshopdev.azurecr.io/user-service:v1.0.0` is cached locally
+2. If not, pulls it from ACR using the kubelet identity (Managed Identity) — no passwords needed
+3. Unpacks the image layers into an overlay filesystem
+4. Creates network namespace, mounts volumes (ConfigMap, Secret, Key Vault CSI files)
+5. Starts the Node.js process inside the isolated container
+6. Reports back to kubelet: container is running, PID is 4821
+
+---
+
+### Part 3 — Additional Components That Run on Worker Nodes
+
+These are not part of the core Kubernetes codebase but run as pods on every node (DaemonSets) or in the cluster and are essential for Kubernetes to function.
+
+#### CoreDNS — The Cluster's Phone Book
+
+CoreDNS runs as pods in the `kube-system` namespace. Every pod in the cluster has its DNS settings configured to point to CoreDNS. When `api-gateway` connects to `user-service:3001`, the name `user-service` is resolved by CoreDNS to the Service's ClusterIP (`10.0.12.5`). Without CoreDNS, pods would need to use IP addresses directly — which is impossible since IPs change when pods restart.
+
+```
+api-gateway pod: "connect to user-service:3001"
+    ↓
+DNS lookup → CoreDNS
+    ↓
+CoreDNS looks up: Service "user-service" in namespace "dev"
+    ↓
+Returns: 10.0.12.5
+    ↓
+api-gateway connects to 10.0.12.5:3001
+    ↓
+kube-proxy routes it to a real pod IP
+```
+
+#### metrics-server — The CPU/Memory Reporter
+
+metrics-server collects CPU and memory usage from the kubelet on every node and exposes it via the API Server. The HPA (Horizontal Pod Autoscaler) uses these metrics to decide whether to scale your deployment up or down. Without metrics-server, `kubectl top nodes` and `kubectl top pods` return errors, and HPA does not work.
+
+---
+
+### Part 4 — How Everything Works Together (Full Journey of `kubectl apply`)
+
+Let's trace exactly what happens when you deploy the user-service to your AKS cluster:
+
+```bash
+kubectl apply -f user-service-deployment.yaml
+```
+
+**Step 1 — kubectl contacts the API Server**
+```
+kubectl reads your kubeconfig (~/.kube/config)
+Gets the AKS API Server endpoint: https://azureshop-aks.hcp.eastus.azmk8s.io
+Sends: HTTP POST /apis/apps/v1/namespaces/dev/deployments
+Body: your deployment YAML
+```
+
+**Step 2 — API Server validates and saves**
+```
+API Server:
+  ✅ Authenticates your token (AAD token via kubelogin)
+  ✅ Authorizes: does this identity have "create deployments" in namespace "dev"?
+  ✅ Validates YAML: are all required fields present? Are values valid?
+  ✅ Saves Deployment object to etcd
+  → Returns: 201 Created
+```
+
+**Step 3 — Deployment Controller sees the new Deployment**
+```
+Deployment Controller (inside Controller Manager):
+  Watches API Server for new/changed Deployments
+  Sees new Deployment: user-service, replicas=2
+  Creates a ReplicaSet: user-service-7d4f9b, replicas=2
+  (writes ReplicaSet to etcd via API Server)
+```
+
+**Step 4 — ReplicaSet Controller sees the new ReplicaSet**
+```
+ReplicaSet Controller:
+  Sees new ReplicaSet wants 2 pods, 0 currently exist
+  Creates 2 Pod objects in etcd (no node assigned yet — status: Pending)
+```
+
+**Step 5 — Scheduler sees unscheduled pods**
+```
+Scheduler watches for Pending pods with no nodeName assigned
+Sees: pod user-service-7d4f9b-abc12 (Pending, no node)
+Filters nodes: which can run this pod?
+  Node 1: CPU OK, Memory OK, no taints blocking ✅
+  Node 2: CPU OK, Memory OK, no taints blocking ✅
+Scores: Node 1 wins (more available memory)
+Binds: updates pod spec → nodeName: "aks-workerpool-node1"
+(writes to etcd via API Server)
+```
+
+**Step 6 — kubelet on Node 1 sees the pod assignment**
+```
+kubelet on aks-workerpool-node1 watches API Server
+Sees: pod user-service-7d4f9b-abc12 assigned to ME
+Calls containerd: "pull and run this image"
+containerd: pulls acrazureshopdev.azurecr.io/user-service:v1.0.0 from ACR
+containerd: starts container, mounts volumes
+kubelet: runs readiness probe (HTTP GET /ready on port 3001)
+Probe passes ✅
+kubelet reports to API Server: pod status → Running
+```
+
+**Step 7 — Endpoints Controller updates the Service**
+```
+Endpoints Controller watches pods and Services
+Sees new pod with label app=user-service is now Running
+Updates Endpoints object for user-service Service:
+  user-service endpoints: [10.240.0.7:3001]
+(if second pod also starts: [10.240.0.7:3001, 10.240.0.8:3001])
+```
+
+**Step 8 — kube-proxy updates iptables**
+```
+kube-proxy on ALL nodes watches Endpoints objects
+Sees Endpoints for user-service updated with new pod IP
+Updates iptables rules on every node:
+  traffic to 10.0.12.5:3001 → DNAT to 10.240.0.7:3001 (or 10.240.0.8:3001)
+```
+
+**Final state — your pod is live and reachable:**
+```
+api-gateway → DNS lookup → user-service:3001 → CoreDNS → 10.0.12.5
+→ iptables (kube-proxy) → 10.240.0.7:3001 → user-service pod
+```
+
+Total time from `kubectl apply` to traffic flowing: typically 15–30 seconds.
+
+---
+
+### Part 5 — AzureShop AKS Architecture Mapping
+
+In AzureShop, here is how the above components map to what you actually have:
+
+```
+┌─────────────────────────────────────────────────────────┐
+│              AKS CLUSTER: azureshop-aks-dev             │
+│                                                         │
+│  ┌──────────────────────────────────────────────────┐   │
+│  │  CONTROL PLANE (Managed by Microsoft / Azure)    │   │
+│  │                                                  │   │
+│  │  API Server   → your kubectl connects here       │   │
+│  │  etcd         → Microsoft backs this up          │   │
+│  │  Scheduler    → places your pods on node pools   │   │
+│  │  Controller Manager → keeps replicas healthy     │   │
+│  │  Cloud CCM    → manages Azure LBs, Disks         │   │
+│  └──────────────────────────────────────────────────┘   │
+│                                                         │
+│  ┌──────────────────┐   ┌──────────────────────────┐   │
+│  │  SYSTEM NODE POOL │   │   USER/APP NODE POOL     │   │
+│  │  (1-2 nodes)      │   │   (2-5 nodes, autoscale) │   │
+│  │                  │   │                          │   │
+│  │  CoreDNS         │   │  user-service (2 pods)   │   │
+│  │  metrics-server  │   │  product-service (2 pods)│   │
+│  │  CSI Driver      │   │  order-service (2 pods)  │   │
+│  │  Workload ID     │   │  payment-service (2 pods)│   │
+│  │  webhook         │   │  api-gateway (2 pods)    │   │
+│  │                  │   │  frontend (2 pods)        │   │
+│  │  kubelet ✅      │   │  Prometheus (1 pod + PVC) │   │
+│  │  kube-proxy ✅   │   │  Grafana (1 pod + PVC)   │   │
+│  │  containerd ✅   │   │                          │   │
+│  └──────────────────┘   │  kubelet ✅              │   │
+│                         │  kube-proxy ✅           │   │
+│                         │  containerd ✅            │   │
+│                         └──────────────────────────┘   │
+└─────────────────────────────────────────────────────────┘
+```
+
+**Why two node pools?**
+- System pool runs Kubernetes infrastructure (CoreDNS, CSI Driver, etc.) — tainted so app pods do not land here
+- User/app pool runs your actual microservices — autoscales from 2 to 5 nodes based on CPU/memory demand
+- Keeping them separate means Kubernetes infrastructure is not starved by your application workloads
+
+---
+
+### Summary Table
+
+| Component | Lives On | Role in simple words |
+|---|---|---|
+| **API Server** | Control Plane | The front door. All requests go through here |
+| **etcd** | Control Plane | The database. Stores everything about the cluster |
+| **Scheduler** | Control Plane | The placement manager. Picks which node each pod runs on |
+| **Controller Manager** | Control Plane | The supervisor. Watches for drift, fixes it to match desired state |
+| **Cloud Controller Manager** | Control Plane | The Azure liaison. Creates LBs, Disks, routes in Azure |
+| **kubelet** | Every Worker Node | The on-site manager. Tells containerd to run pods |
+| **kube-proxy** | Every Worker Node | The network rules engine. Routes Service traffic to pods |
+| **containerd** | Every Worker Node | The factory floor. Actually pulls images and runs containers |
+| **CoreDNS** | Worker Nodes (pods) | The phone book. Resolves service names to IPs |
+| **metrics-server** | Worker Nodes (pods) | The reporter. Collects CPU/memory for HPA |
+
+---
+
+### Interview Prep
+
+1. **What is the role of the API Server in Kubernetes?** — The API Server is the single entry point for all operations in a Kubernetes cluster. Every component — kubectl, Scheduler, Controller Manager, kubelet — communicates exclusively through the API Server. It authenticates and authorizes requests, validates resource definitions, and persists the desired state to etcd. It acts as the "front door" — nothing bypasses it.
+
+2. **What is etcd and why is it critical?** — etcd is the distributed key-value store that is the source of truth for the entire cluster state — every Deployment, Pod, Service, Secret, and node registration is stored here. Only the API Server talks to etcd directly. Losing etcd without a backup means losing the entire cluster configuration. In AKS, Microsoft manages and backs up etcd automatically, which is one of the key benefits of a managed Kubernetes service.
+
+3. **What is the difference between the Scheduler and the Controller Manager?** — The Scheduler decides WHERE a new pod runs (which node). It does not start pods or manage their count. The Controller Manager decides WHAT should exist — it watches Deployments and ensures the right number of pods are running. They work together: Controller Manager creates pod objects, Scheduler assigns them to nodes.
+
+4. **What does the kubelet do?** — The kubelet is the agent running on every worker node. It watches the API Server for pods assigned to its node, instructs the container runtime (containerd) to pull images and start containers, runs health probes, mounts volumes, and reports pod status back to the API Server. It is the link between the Control Plane's decisions and the actual container execution on the node.
+
+5. **What does kube-proxy do and how does it work?** — kube-proxy runs on every node and programs iptables (or IPVS) rules that implement Kubernetes Services. When you create a Service, kube-proxy creates rules that transparently redirect traffic destined for the Service's virtual ClusterIP to the actual pod IPs behind it. It also watches Endpoints objects and updates rules instantly when pods come and go, ensuring no traffic is sent to dead pods.
+
+6. **What is the difference between the kubelet and the Container Runtime?** — The kubelet is the decision-maker and manager on the node — it receives pod specs from the API Server, coordinates volume mounts, enforces resource limits, and runs health checks. The Container Runtime (containerd) is the executor — it handles the low-level work of pulling images from registries and creating/starting/stopping the actual container processes. They communicate via the CRI (Container Runtime Interface) API.
+
+7. **What happens when you run `kubectl apply -f deployment.yaml`?** — kubectl sends an HTTP request to the API Server. The API Server authenticates, authorizes, and validates the request, then saves the Deployment to etcd. The Deployment Controller creates a ReplicaSet, the ReplicaSet Controller creates Pod objects (unscheduled). The Scheduler picks nodes for the pods and writes the assignments to etcd. The kubelet on each assigned node sees the pod, tells containerd to pull the image and run the container. Once the container passes its readiness probe, the Endpoints Controller adds the pod IP to the Service's endpoints, and kube-proxy updates its iptables rules so traffic flows to the new pod.
+
+8. **In AKS, what does Microsoft manage and what do you manage?** — Microsoft fully manages the Control Plane: API Server, etcd (including backups), Scheduler, Controller Manager, and Cloud Controller Manager. You are not billed separately for these, you cannot SSH into the master, and Microsoft handles HA, patching, and upgrades for them. You manage the Worker Nodes: you choose the VM size, the node pool count, autoscale settings, and are responsible for what runs on the nodes. You also manage all Kubernetes objects: Deployments, Services, Ingress, ConfigMaps, Secrets, RBAC, etc.
+
