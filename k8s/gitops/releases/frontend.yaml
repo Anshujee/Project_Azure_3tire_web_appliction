@@ -1,0 +1,22 @@
+apiVersion: helm.toolkit.fluxcd.io/v2
+kind: HelmRelease
+metadata:
+  name: frontend
+  namespace: dev
+spec:
+  interval: 5m
+  chart:
+    spec:
+      chart: ./helm/charts/frontend
+      sourceRef:
+        kind: GitRepository
+        name: azureshop
+        namespace: flux-system
+      interval: 1m
+  install:
+    remediation:
+      retries: 3
+  upgrade:
+    remediation:
+      retries: 3
+      remediateLastFailure: true

@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "azureshop.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "azureshop.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.service.port }}
+      targetPort: {{ .Values.service.targetPort }}
+      protocol: TCP
+      name: http
+  selector:
+    {{- include "azureshop.selectorLabels" . | nindent 4 }}

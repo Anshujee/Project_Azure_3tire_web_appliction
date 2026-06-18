@@ -1,0 +1,20 @@
+# Dev environment overrides — applied on top of each service's values.yaml
+# Usage: helm upgrade --install <svc> helm/charts/<svc>/ -f helm/values/dev.yaml
+
+# Lower replica count in dev to save node resources
+replicaCount: 1
+
+# Relaxed resource limits for dev (shared cluster)
+resources:
+  requests:
+    cpu: "50m"
+    memory: "64Mi"
+  limits:
+    cpu: "300m"
+    memory: "256Mi"
+
+# Scale down HPA in dev — single pod is fine for testing
+hpa:
+  minReplicas: 1
+  maxReplicas: 3
+  cpuUtilizationPercentage: 80

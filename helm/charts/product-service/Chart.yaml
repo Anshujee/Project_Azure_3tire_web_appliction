@@ -1,0 +1,6 @@
+apiVersion: v2
+name: product-service
+description: AzureShop Product Service — product catalog and search (Python/FastAPI + Cosmos DB)
+type: application
+version: 0.1.0
+appVersion: "v1.0.0"

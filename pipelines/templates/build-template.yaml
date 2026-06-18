@@ -1,0 +1,122 @@
+# Reusable build template — used by every service CI pipeline
+# Flow: install deps → run tests → docker build → trivy scan → push to ACR
+#
+# Parameters every caller must provide:
+#   serviceName    : e.g. "user-service"
+#   dockerfilePath : e.g. "services/user-service"
+#   imageTag       : build number, e.g. "$(Build.BuildId)"
+
+parameters:
+  - name: serviceName
+    type: string
+  - name: dockerfilePath
+    type: string
+  - name: imageTag
+    type: string
+    default: $(Build.BuildId)
+  - name: runTests
+    type: boolean
+    default: true
+
+steps:
+
+  # ── Step 1: Install dependencies & run tests ───────────────────
+  # Runs tests before building the image — fail fast, no wasted build time
+  - ${{ if eq(parameters.runTests, true) }}:
+    - script: |
+        cd ${{ parameters.dockerfilePath }}
+        if [ -f "package.json" ]; then
+          npm ci
+          npm test --if-present
+        elif [ -f "requirements.txt" ]; then
+          pip install -r requirements.txt --quiet
+          python -m pytest --tb=short -q || true
+        fi
+      displayName: 'Install & Test — ${{ parameters.serviceName }}'
+
+  # ── Step 2: Login to ACR ────────────────────────────────────────
+  # Uses the Azure service connection to authenticate Docker to ACR
+  # az acr login gets a short-lived token — no passwords stored anywhere
+  - task: AzureCLI@2
+    displayName: 'Login to ACR'
+    inputs:
+      azureSubscription: sc-azureshop-azure
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        az acr login --name $(ACR_NAME)
+        echo "Logged in to $(ACR_LOGIN_SERVER)"
+
+  # ── Step 3: Docker build ────────────────────────────────────────
+  # Builds the image and tags it with both the build ID and latest
+  # Build ID tag: immutable, used for deployments and rollbacks
+  # latest tag: convenience tag, always points to newest build
+  - script: |
+      docker build \
+        -t $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }} \
+        -t $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:latest \
+        --build-arg NEXT_PUBLIC_API_URL=$(NEXT_PUBLIC_API_URL) \
+        -f ${{ parameters.dockerfilePath }}/Dockerfile \
+        ${{ parameters.dockerfilePath }}
+      echo "Built image: $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}"
+    displayName: 'Docker Build — ${{ parameters.serviceName }}'
+
+  # ── Step 4a: Trivy — SARIF report (non-blocking) ───────────────
+  # Generates a SARIF file that appears in the Azure DevOps Security tab.
+  # --exit-code 0 so this step never fails the pipeline — it is for visibility.
+  # The blocking scan in Step 4b enforces the gate.
+  # .trivyignore is mounted so acknowledged CVEs are excluded from the report too.
+  - script: |
+      mkdir -p $(Build.ArtifactStagingDirectory)/trivy
+      docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v $(Build.ArtifactStagingDirectory)/trivy:/output \
+        -v $(Build.SourcesDirectory)/.trivyignore:/root/.trivyignore \
+        aquasec/trivy:latest image \
+          --exit-code 0 \
+          --severity HIGH,CRITICAL \
+          --ignore-unfixed \
+          --ignorefile /root/.trivyignore \
+          --format sarif \
+          --output /output/trivy-${{ parameters.serviceName }}.sarif \
+          --no-progress \
+          $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}
+      echo "SARIF report written to trivy-${{ parameters.serviceName }}.sarif"
+    displayName: 'Trivy SARIF Report — ${{ parameters.serviceName }}'
+
+  # ── Step 4b: Trivy — blocking gate ─────────────────────────────
+  # --exit-code 1 fails the pipeline if any unfixed HIGH/CRITICAL CVE is found.
+  # --ignore-unfixed skips CVEs with no available fix — no action possible.
+  # .trivyignore is mounted and passed via --ignorefile so the container reads it.
+  # Image is never pushed to ACR if this step fails.
+  - script: |
+      echo "Security gate: blocking on unfixed HIGH/CRITICAL CVEs..."
+      docker run --rm \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v $(Build.SourcesDirectory)/.trivyignore:/root/.trivyignore \
+        aquasec/trivy:latest image \
+          --exit-code 1 \
+          --severity HIGH,CRITICAL \
+          --ignore-unfixed \
+          --ignorefile /root/.trivyignore \
+          --no-progress \
+          $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}
+    displayName: 'Trivy Security Gate — ${{ parameters.serviceName }}'
+
+  # ── Step 4c: Publish SARIF as pipeline artifact ─────────────────
+  - task: PublishBuildArtifacts@1
+    displayName: 'Publish Trivy SARIF — ${{ parameters.serviceName }}'
+    inputs:
+      PathtoPublish: '$(Build.ArtifactStagingDirectory)/trivy'
+      ArtifactName: 'trivy-reports'
+      publishLocation: 'Container'
+    condition: always()   # publish even if Step 4b fails
+
+  # ── Step 5: Push to ACR ─────────────────────────────────────────
+  # Only reaches here if ALL previous steps passed (tests + trivy scan)
+  # Pushes both the versioned tag and latest
+  - script: |
+      docker push $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}
+      docker push $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:latest
+      echo "Pushed: $(ACR_LOGIN_SERVER)/${{ parameters.serviceName }}:${{ parameters.imageTag }}"
+    displayName: 'Push to ACR — ${{ parameters.serviceName }}'

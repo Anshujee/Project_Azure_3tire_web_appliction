@@ -1,0 +1,14 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "azureshop.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "azureshop.labels" . | nindent 4 }}
+spec:
+  # At least 1 pod must remain available during voluntary disruptions
+  # (node drains, cluster upgrades) — prevents full downtime during maintenance
+  minAvailable: 1
+  selector:
+    matchLabels:
+      {{- include "azureshop.selectorLabels" . | nindent 6 }}

@@ -1,0 +1,50 @@
+# ResourceQuota — hard ceiling on total resource consumption in the dev namespace.
+# Prevents one runaway service from consuming all cluster resources.
+# If a Pod's resource requests would push the namespace over the quota, the Pod is rejected at admission.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: dev-quota
+  namespace: dev
+spec:
+  hard:
+    # CPU: 8 cores total requests, 16 cores total limits
+    requests.cpu: "8"
+    limits.cpu: "16"
+    # Memory: 8 GiB total requests, 16 GiB total limits
+    requests.memory: "8Gi"
+    limits.memory: "16Gi"
+    # Object counts
+    pods: "50"
+    services: "20"
+    persistentvolumeclaims: "10"
+    secrets: "50"
+    configmaps: "30"
+---
+# LimitRange — default resource requests/limits applied to any container that does not set its own.
+# Also enforces a max so no single container can request unlimited resources.
+# Without a LimitRange, containers with no requests/limits bypass the ResourceQuota checks
+# (quota only counts if requests/limits are set).
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: dev-limit-range
+  namespace: dev
+spec:
+  limits:
+    - type: Container
+      # Applied when a container omits requests/limits entirely
+      default:
+        cpu: "500m"
+        memory: "512Mi"
+      defaultRequest:
+        cpu: "100m"
+        memory: "128Mi"
+      # Hard ceiling — no single container can exceed this
+      max:
+        cpu: "2"
+        memory: "2Gi"
+      # No container can request less than this (prevents zero-request containers)
+      min:
+        cpu: "10m"
+        memory: "16Mi"

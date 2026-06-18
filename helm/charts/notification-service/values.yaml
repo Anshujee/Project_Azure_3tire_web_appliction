@@ -1,0 +1,66 @@
+image:
+  repository: acrazureshopdev.azurecr.io/notification-service
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  port: 3006
+  targetPort: 3006
+
+env:
+  - name: PORT
+    value: "3006"
+  - name: NODE_ENV
+    value: "production"
+
+# Service Bus connection string not yet in Key Vault
+# Will be added when Service Bus secrets are stored (post Phase 6)
+  - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+    valueFrom:
+      secretKeyRef:
+        name: notification-service-secrets
+        key: APPINSIGHTS_CONNECTION_STRING
+        optional: true
+secretProviderClass:
+  enabled: false
+  name: ""
+  secretName: ""
+
+probes:
+  path: /health
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+  cpuUtilizationPercentage: 70
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  annotations:
+    azure.workload.identity/client-id: "2e5e41cb-dd6c-46a5-8420-165c463fe974"
+
+workloadIdentity:
+  enabled: true

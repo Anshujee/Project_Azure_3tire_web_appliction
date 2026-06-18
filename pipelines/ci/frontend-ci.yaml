@@ -1,0 +1,49 @@
+# CI Pipeline — frontend (Next.js)
+# Triggers: any push/PR to dev that touches services/frontend/**
+# Note: NEXT_PUBLIC_API_URL is a BUILD-TIME variable — baked into the JS bundle
+# It points to the API Gateway address for each environment
+
+trigger:
+  branches:
+    include:
+      - dev
+      - feature/*
+  paths:
+    include:
+      - services/frontend/**
+
+pr:
+  branches:
+    include:
+      - dev
+  paths:
+    include:
+      - services/frontend/**
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: vg-common
+  - name: SERVICE_NAME
+    value: frontend
+  - name: DOCKERFILE_PATH
+    value: services/frontend
+  # API Gateway address — baked into the Next.js bundle at build time
+  # In production this would point to the Application Gateway public IP/DNS
+  - name: NEXT_PUBLIC_API_URL
+    value: http://$(ACR_LOGIN_SERVER)
+
+stages:
+  - stage: CI
+    displayName: 'CI — frontend'
+    jobs:
+      - job: BuildAndPush
+        displayName: 'Build, Scan & Push'
+        steps:
+          - template: ../templates/build-template.yaml
+            parameters:
+              serviceName: $(SERVICE_NAME)
+              dockerfilePath: $(DOCKERFILE_PATH)
+              imageTag: $(Build.BuildId)
+              runTests: false

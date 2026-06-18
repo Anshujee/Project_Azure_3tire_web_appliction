@@ -1,0 +1,193 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# kube-prometheus-stack Helm values — AzureShop dev environment
+#
+# Install command (run once, monitoring namespace must exist first):
+#   helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+#   helm repo update
+#   helm upgrade --install kube-prometheus-stack prometheus-community/kube-prometheus-stack \
+#     --namespace monitoring \
+#     --values helm/values/kube-prometheus-stack.yaml \
+#     --version 61.3.0 \
+#     --wait
+#
+# Access Grafana locally (no public exposure by design):
+#   kubectl port-forward svc/kube-prometheus-stack-grafana 3000:80 -n monitoring
+#   Open: http://localhost:3000  (admin / see grafana.adminPassword below)
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Prometheus ────────────────────────────────────────────────────────────────
+prometheus:
+  prometheusSpec:
+    # How long Prometheus keeps data on disk before dropping old samples
+    retention: 15d
+
+    # Persistent volume — survives pod restarts
+    # managed-csi is the default AKS StorageClass (Azure Disk)
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 20Gi
+
+    resources:
+      requests:
+        cpu: 200m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 2Gi
+
+    # ── Annotation-based pod scraping ──────────────────────────────────────
+    # Picks up any pod in the cluster that has:
+    #   prometheus.io/scrape: "true"
+    #   prometheus.io/port:   "<port>"
+    #   prometheus.io/path:   "/metrics"
+    # All 8 AzureShop services have these annotations on their pod templates.
+    additionalScrapeConfigs:
+      - job_name: kubernetes-pods
+        kubernetes_sd_configs:
+          - role: pod
+
+        relabel_configs:
+          # Only scrape pods that opt in with the annotation
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+
+          # Use the annotated path (/metrics) instead of the default /metrics
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+
+          # Replace the port in the address with the annotated port
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+
+          # Carry all pod labels through as Prometheus labels
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+
+          # Add namespace and pod name as labels — useful for filtering in dashboards
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+
+    # Watch ServiceMonitors and PodMonitors from all namespaces
+    # (kube-prometheus-stack creates its own monitors for infra components)
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+
+# ── Grafana ───────────────────────────────────────────────────────────────────
+# Embedded Grafana — used for Prometheus/Kubernetes metrics dashboards.
+# Azure Managed Grafana (created by Terraform) is used for Azure Monitor/App Insights.
+grafana:
+  enabled: true
+
+  adminPassword: "AzureShop@Grafana2024"
+
+  # ClusterIP only — access via kubectl port-forward, not exposed publicly
+  service:
+    type: ClusterIP
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  # Persist Grafana state (dashboards saved in UI, user sessions)
+  persistence:
+    enabled: true
+    storageClassName: managed-csi
+    size: 5Gi
+
+  # Pre-provision our AzureShop dashboard from the ConfigMap created below
+  dashboardProviders:
+    dashboardproviders.yaml:
+      apiVersion: 1
+      providers:
+        - name: azureshop
+          orgId: 1
+          folder: AzureShop
+          type: file
+          disableDeletion: false
+          editable: true
+          options:
+            path: /var/lib/grafana/dashboards/azureshop
+
+  # Load dashboard JSON from a Kubernetes ConfigMap
+  # The ConfigMap is created separately in k8s/grafana-dashboards/
+  dashboardsConfigMaps:
+    azureshop: grafana-dashboards-azureshop
+
+  grafana.ini:
+    server:
+      root_url: "%(protocol)s://%(domain)s/"
+    analytics:
+      check_for_updates: false
+    log:
+      mode: console
+      level: warn
+
+# ── Alertmanager ──────────────────────────────────────────────────────────────
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+
+    storage:
+      volumeClaimTemplate:
+        spec:
+          storageClassName: managed-csi
+          accessModes:
+            - ReadWriteOnce
+          resources:
+            requests:
+              storage: 2Gi
+
+# ── Node Exporter ─────────────────────────────────────────────────────────────
+# Runs as DaemonSet — one pod per node, exposes node-level metrics
+# (CPU, memory, disk, network per node)
+nodeExporter:
+  enabled: true
+  resources:
+    requests:
+      cpu: 50m
+      memory: 32Mi
+    limits:
+      cpu: 200m
+      memory: 128Mi
+
+# ── Kube State Metrics ────────────────────────────────────────────────────────
+# Exposes Kubernetes object state as metrics
+# (pod counts, deployment replicas, PVC status, etc.)
+kubeStateMetrics:
+  enabled: true
+
+# ── Prometheus Operator ───────────────────────────────────────────────────────
+prometheusOperator:
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi

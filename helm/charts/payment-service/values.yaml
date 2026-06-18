@@ -1,0 +1,62 @@
+image:
+  repository: acrazureshopdev.azurecr.io/payment-service
+  tag: "v1.0.0"
+  pullPolicy: IfNotPresent
+
+replicaCount: 2
+
+service:
+  port: 3005
+  targetPort: 3005
+
+env:
+  - name: PORT
+    value: "3005"
+  - name: NODE_ENV
+    value: "production"
+
+# Key Vault CSI — injects SQL credentials as env vars
+  - name: APPLICATIONINSIGHTS_CONNECTION_STRING
+    valueFrom:
+      secretKeyRef:
+        name: payment-service-secrets
+        key: APPINSIGHTS_CONNECTION_STRING
+        optional: true
+secretProviderClass:
+  enabled: true
+  name: payment-service-secrets
+  secretName: payment-service-secrets
+  # Injected env vars: SQL_SERVER, SQL_USER, SQL_PASSWORD
+
+probes:
+  path: /health
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"
+    memory: "512Mi"
+
+hpa:
+  minReplicas: 2
+  maxReplicas: 10
+  cpuUtilizationPercentage: 70
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 1001
+  runAsGroup: 1001
+  seccompProfile:
+    type: RuntimeDefault
+
+containerSecurityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+serviceAccount:
+  annotations: {}

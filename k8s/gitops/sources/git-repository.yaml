@@ -1,0 +1,24 @@
+# GitRepository source — tells Flux where to pull manifests from.
+# This resource is created by azurerm_kubernetes_flux_configuration in Terraform.
+# Stored here for documentation and manual apply scenarios only.
+#
+# The secretRef resolves to a Kubernetes Secret containing the Azure DevOps PAT.
+# Create that secret manually before applying Flux configs:
+#
+#   kubectl create secret generic azureshop-git-credentials \
+#     --namespace flux-system \
+#     --from-literal=username=anything \
+#     --from-literal=password=<AZURE_DEVOPS_PAT>
+#
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: GitRepository
+metadata:
+  name: azureshop
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: https://dev.azure.com/azureshop-org/AzureShop/_git/AzureShop
+  ref:
+    branch: dev
+  secretRef:
+    name: azureshop-git-credentials

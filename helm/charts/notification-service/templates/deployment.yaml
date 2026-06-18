@@ -1,0 +1,102 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "azureshop.name" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "azureshop.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "azureshop.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "{{ .Values.service.targetPort | toString }}"
+        prometheus.io/path: "/metrics"
+      labels:
+        {{- include "azureshop.labels" . | nindent 8 }}
+        {{- if .Values.workloadIdentity.enabled }}
+        azure.workload.identity/use: "true"
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "azureshop.name" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      # Spread pods across nodes — prevents all replicas landing on one node
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "azureshop.selectorLabels" . | nindent 14 }}
+      containers:
+        - name: {{ include "azureshop.name" . }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - containerPort: {{ .Values.service.targetPort }}
+              protocol: TCP
+          securityContext:
+            {{- toYaml .Values.containerSecurityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          # Non-sensitive config from values.yaml
+          {{- if .Values.env }}
+          env:
+            {{- toYaml .Values.env | nindent 12 }}
+          {{- end }}
+          # Sensitive config injected from the Kubernetes Secret that the
+          # CSI driver creates when it mounts the Key Vault volume below
+          {{- if .Values.secretProviderClass.enabled }}
+          envFrom:
+            - secretRef:
+                name: {{ .Values.secretProviderClass.secretName }}
+          {{- end }}
+          # Startup probe — gives slow-starting containers time before liveness kicks in
+          startupProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: {{ .Values.service.targetPort }}
+            failureThreshold: 30
+            periodSeconds: 10
+          # Liveness probe — restarts the container if it becomes unhealthy
+          livenessProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            failureThreshold: 3
+          # Readiness probe — removes pod from Service endpoints until it is ready
+          readinessProbe:
+            httpGet:
+              path: {{ .Values.probes.path }}
+              port: {{ .Values.service.targetPort }}
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if .Values.secretProviderClass.enabled }}
+            - name: secrets-store
+              mountPath: /mnt/secrets-store
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        {{- if .Values.secretProviderClass.enabled }}
+        # CSI volume — the driver mounts this, reads from Key Vault, and
+        # creates a Kubernetes Secret (referenced in envFrom above)
+        - name: secrets-store
+          csi:
+            driver: secrets-store.csi.k8s.io
+            readOnly: true
+            volumeAttributes:
+              secretProviderClass: {{ .Values.secretProviderClass.name }}
+        {{- end }}

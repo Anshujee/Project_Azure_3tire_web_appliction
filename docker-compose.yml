@@ -1,0 +1,153 @@
+# ═══════════════════════════════════════════════════════════════
+# AzureShop — Local Development with Docker Compose
+#
+# Starts all 8 microservices + local databases (SQL Server, Redis)
+# product-service runs in degraded mode (no local Cosmos DB emulator)
+#
+# Usage:
+#   docker compose up --build          # first time — builds all images
+#   docker compose up                  # subsequent runs — uses cached images
+#   docker compose down                # stop and remove containers
+#   docker compose logs -f <service>   # stream logs from a specific service
+# ═══════════════════════════════════════════════════════════════
+
+services:
+
+  # ─────────────────────────────────────────────────────────────
+  # LOCAL DATABASES
+  # These replace Azure SQL and Azure Redis for local development
+  # ─────────────────────────────────────────────────────────────
+
+  sqlserver:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    environment:
+      - ACCEPT_EULA=Y
+      - SA_PASSWORD=Local@DevPassword1
+    ports:
+      - "1433:1433"       # expose so you can connect with a SQL client
+    healthcheck:
+      test: /opt/mssql-tools18/bin/sqlcmd -S localhost -U sa -P "Local@DevPassword1" -Q "SELECT 1" -C || exit 1
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s   # SQL Server takes ~20s to start — give it time
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"       # expose so you can connect with redis-cli
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ─────────────────────────────────────────────────────────────
+  # MICROSERVICES
+  # ─────────────────────────────────────────────────────────────
+
+  user-service:
+    build: ./services/user-service
+    ports:
+      - "3001:3001"
+    environment:
+      - NODE_ENV=development
+      - PORT=3001
+      - DB_SERVER=sqlserver        # service name = hostname in Docker network
+      - DB_NAME=db-users
+      - DB_USER=sa
+      - DB_PASSWORD=Local@DevPassword1
+      - DB_TRUST_CERT=true         # local SQL Server uses self-signed certificate
+    depends_on:
+      sqlserver:
+        condition: service_healthy  # wait until SQL Server passes health check
+
+  product-service:
+    build: ./services/product-service
+    ports:
+      - "3002:3002"
+    environment:
+      - PORT=3002
+      # No Cosmos DB locally — service starts in degraded mode
+      # Health check will report "degraded" but service still runs
+      - COSMOS_ENDPOINT=
+      - COSMOS_KEY=
+
+  cart-service:
+    build: ./services/cart-service
+    ports:
+      - "3003:3003"
+    environment:
+      - NODE_ENV=development
+      - PORT=3003
+      - REDIS_HOST=redis            # service name = hostname in Docker network
+      - REDIS_PORT=6379             # local Redis uses plain port 6379 (no TLS)
+      - REDIS_PASSWORD=             # local Redis has no password
+      - REDIS_TLS=false             # disable TLS for local Redis
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  order-service:
+    build: ./services/order-service
+    ports:
+      - "3004:3004"
+    environment:
+      - NODE_ENV=development
+      - PORT=3004
+      - DB_SERVER=sqlserver
+      - DB_NAME=db-orders
+      - DB_USER=sa
+      - DB_PASSWORD=Local@DevPassword1
+      - DB_TRUST_CERT=true
+    depends_on:
+      sqlserver:
+        condition: service_healthy
+
+  payment-service:
+    build: ./services/payment-service
+    ports:
+      - "3005:3005"
+    environment:
+      - NODE_ENV=development
+      - PORT=3005
+
+  notification-service:
+    build: ./services/notification-service
+    ports:
+      - "3006:3006"
+    environment:
+      - NODE_ENV=development
+      - PORT=3006
+
+  api-gateway:
+    build: ./services/api-gateway
+    ports:
+      - "8080:8080"       # THIS is the only port exposed to the outside world
+    depends_on:
+      - user-service
+      - product-service
+      - cart-service
+      - order-service
+      - payment-service
+      - frontend
+
+  frontend:
+    build:
+      context: ./services/frontend
+      args:
+        - NEXT_PUBLIC_API_URL=http://localhost:8080   # browser calls the gateway
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - HOSTNAME=0.0.0.0
+
+# ─────────────────────────────────────────────────────────────
+# NETWORK
+# Docker Compose creates this automatically — all services
+# can reach each other by name on this network
+# ─────────────────────────────────────────────────────────────
+networks:
+  default:
+    name: azureshop-network
