@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File), Kubernetes Ingress (Ingress resource vs Ingress Controller, NGINX Ingress, path-based routing, TLS termination, canary deployments, how AzureShop routes traffic through Application Gateway → NGINX → api-gateway → services), Full Kubernetes Architecture (Control Plane components: API Server, etcd, Scheduler, Controller Manager, Cloud Controller Manager — Worker Node components: kubelet, kube-proxy, Container Runtime, Pods — end-to-end flow of kubectl apply, AzureShop AKS architecture mapping).
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File), Kubernetes Ingress (Ingress resource vs Ingress Controller, NGINX Ingress, path-based routing, TLS termination, canary deployments, how AzureShop routes traffic through Application Gateway → NGINX → api-gateway → services), Full Kubernetes Architecture (Control Plane components: API Server, etcd, Scheduler, Controller Manager, Cloud Controller Manager — Worker Node components: kubelet, kube-proxy, Container Runtime, Pods — end-to-end flow of kubectl apply, AzureShop AKS architecture mapping), Init Containers (purpose, sequencing, real-world use cases, AzureShop examples), Resource Requests and Limits (CPU/memory requests vs limits, how Scheduler uses them, OOMKilled, QoS classes, AzureShop values), Taints and Tolerations (what they are, taint effects, how AzureShop system node pool uses them, NodeSelector vs NodeAffinity vs Taints), StatefulSet vs Deployment (ordered pods, stable network identity, headless Service, when to use each, AzureShop databases), DaemonSet (one pod per node guarantee, use cases, how AzureShop uses DaemonSets for monitoring and CSI).
 
 ---
 
@@ -37,6 +37,11 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 28. [What is a Persistent Volume and a Persistent Volume Claim in Kubernetes?](#q28-what-is-a-persistent-volume-and-a-persistent-volume-claim-in-kubernetes)
 29. [What is Kubernetes Ingress? How Does it Work, and How is it Used in AzureShop?](#q29-what-is-kubernetes-ingress-how-does-it-work-and-how-is-it-used-in-azureshop)
 30. [What is the Full Architecture of Kubernetes? Explain Every Master Node and Worker Node Component in Detail](#q30-what-is-the-full-architecture-of-kubernetes-explain-every-master-node-and-worker-node-component-in-detail)
+31. [What is an Init Container and Why Do We Use It?](#q31-what-is-an-init-container-and-why-do-we-use-it)
+32. [What are Resource Requests and Limits in Kubernetes?](#q32-what-are-resource-requests-and-limits-in-kubernetes)
+33. [What are Taints and Tolerations in Kubernetes?](#q33-what-are-taints-and-tolerations-in-kubernetes)
+34. [What is the Difference Between a StatefulSet and a Deployment?](#q34-what-is-the-difference-between-a-statefulset-and-a-deployment)
+35. [What is a DaemonSet in Kubernetes and When Do You Use It?](#q35-what-is-a-daemonset-in-kubernetes-and-when-do-you-use-it)
 
 ---
 
@@ -7208,4 +7213,834 @@ In AzureShop, here is how the above components map to what you actually have:
 7. **What happens when you run `kubectl apply -f deployment.yaml`?** — kubectl sends an HTTP request to the API Server. The API Server authenticates, authorizes, and validates the request, then saves the Deployment to etcd. The Deployment Controller creates a ReplicaSet, the ReplicaSet Controller creates Pod objects (unscheduled). The Scheduler picks nodes for the pods and writes the assignments to etcd. The kubelet on each assigned node sees the pod, tells containerd to pull the image and run the container. Once the container passes its readiness probe, the Endpoints Controller adds the pod IP to the Service's endpoints, and kube-proxy updates its iptables rules so traffic flows to the new pod.
 
 8. **In AKS, what does Microsoft manage and what do you manage?** — Microsoft fully manages the Control Plane: API Server, etcd (including backups), Scheduler, Controller Manager, and Cloud Controller Manager. You are not billed separately for these, you cannot SSH into the master, and Microsoft handles HA, patching, and upgrades for them. You manage the Worker Nodes: you choose the VM size, the node pool count, autoscale settings, and are responsible for what runs on the nodes. You also manage all Kubernetes objects: Deployments, Services, Ingress, ConfigMaps, Secrets, RBAC, etc.
+
+
+---
+
+## Q31. What is an Init Container and Why Do We Use It?
+
+### The Simple Explanation
+
+An Init Container is a **special container that runs and completes BEFORE your main application container starts**. Think of it as a preparation step. Your main app only starts if ALL init containers finish successfully. If an init container fails, Kubernetes keeps retrying it until it succeeds — the main container never starts until every init container has passed.
+
+### Real-life Analogy
+
+Think of opening a restaurant in the morning. Before the chef (your main app) can start cooking, several things must happen first:
+
+1. The cleaning crew must finish cleaning the kitchen ✅
+2. The delivery person must drop off fresh ingredients ✅
+3. The gas must be turned on and checked ✅
+
+Only after all three tasks are done does the chef walk in and start cooking. If the delivery person hasn't arrived yet, the chef waits. The chef does not start cooking with yesterday's ingredients — they wait for the correct setup to be ready.
+
+Init containers work exactly like this. They run in order, one after another. Each one must finish before the next one starts. The main container only starts after the last init container completes successfully.
+
+### How Init Containers Differ from Regular Containers
+
+| Feature | Init Container | Main (App) Container |
+|---|---|---|
+| **When it runs** | Before the main container | After all init containers finish |
+| **Runs to completion?** | Yes — runs once and exits | No — keeps running continuously |
+| **If it fails?** | Pod restarts init container | Pod restarts the main container |
+| **Can have multiple?** | Yes — run in sequence, one at a time | Yes — run in parallel (sidecars) |
+| **Has app traffic?** | No — does setup only | Yes — serves real traffic |
+| **Same image as app?** | No — usually a different, minimal image | Yes — your application image |
+
+### What Init Containers Are Used For
+
+**1. Wait for a dependency to be ready**
+The most common use. Your app needs a database to be ready before it starts. Without an init container, your app starts immediately, tries to connect to the database, fails, and crashes — entering CrashLoopBackOff.
+
+```
+Init Container: "keep trying to connect to postgres until it responds"
+  → runs until postgres is ready
+  → exits with code 0
+
+Main Container: user-service starts
+  → database is already ready → no crash
+```
+
+**2. Download or prepare files before the app starts**
+Pull a config file from an external URL, decrypt a certificate, unzip an archive — and place the result in a shared volume that the main container reads.
+
+**3. Run database migrations**
+Before the new version of your app starts, run `db-migrate up` to apply schema changes. The migration runs once as an init container, exits, then the app starts with the updated schema.
+
+**4. Set up permissions or environment**
+Some apps need specific file permissions set up before they start. An init container can `chmod` or `chown` files on a shared volume.
+
+### What a Shared Volume Between Init and Main Container Looks Like
+
+Init containers and main containers can share a volume — this is how they pass data to each other:
+
+```
+Volume: shared-data (emptyDir)
+    ↑ written by init container
+    ↓ read by main container
+
+Init Container:
+  - mounts /init-work → shared-data
+  - downloads config file → /init-work/config.json
+  - exits
+
+Main Container:
+  - mounts /app/config → shared-data
+  - reads /app/config/config.json
+  - starts the application
+```
+
+### YAML Example
+
+```yaml
+spec:
+  initContainers:
+    - name: wait-for-db
+      image: busybox:1.35
+      command:
+        - sh
+        - -c
+        - |
+          until nc -z postgres-service 5432; do
+            echo "Waiting for PostgreSQL..."
+            sleep 2
+          done
+          echo "PostgreSQL is ready!"
+
+    - name: run-migrations
+      image: acrazureshopdev.azurecr.io/user-service:v1.0.0
+      command: ["node", "migrate.js"]
+      env:
+        - name: DB_HOST
+          value: postgres-service
+
+  containers:
+    - name: user-service
+      image: acrazureshopdev.azurecr.io/user-service:v1.0.0
+      ports:
+        - containerPort: 3001
+```
+
+**What happens here:**
+1. `wait-for-db` starts — keeps running `nc -z postgres-service 5432` every 2 seconds until port 5432 responds
+2. Once postgres is ready, `wait-for-db` exits with code 0
+3. `run-migrations` starts — runs the database migration script and exits
+4. `user-service` (main container) starts — database is ready AND migrations are applied
+
+### How Init Containers Appear in kubectl
+
+```bash
+kubectl get pods -n dev
+
+NAME                            READY   STATUS       RESTARTS
+user-service-7d4f9b-abc12      0/1     Init:0/2     0
+# → 0 of 2 init containers done, main container not started yet
+
+user-service-7d4f9b-abc12      0/1     Init:1/2     0
+# → 1 of 2 init containers done
+
+user-service-7d4f9b-abc12      0/1     PodInitializing  0
+# → all init containers done, main container starting
+
+user-service-7d4f9b-abc12      1/1     Running      0
+# → main container running and ready
+```
+
+### In AzureShop
+
+AzureShop uses init containers in two scenarios:
+
+**1. Service startup ordering** — `order-service` depends on both `product-service` and `user-service` being available. An init container checks both service DNS names are reachable before order-service starts:
+
+```yaml
+initContainers:
+  - name: wait-for-user-service
+    image: busybox:1.35
+    command: ['sh', '-c', 'until nc -z user-service 3001; do sleep 2; done']
+  - name: wait-for-product-service
+    image: busybox:1.35
+    command: ['sh', '-c', 'until nc -z product-service 3002; do sleep 2; done']
+```
+
+**2. Key Vault secret pre-fetch** — before a service starts, an init container verifies the Key Vault CSI mount is present and readable, preventing the app from starting with missing secrets.
+
+---
+
+### Interview Prep
+
+1. **What is an init container?** — An init container is a special container that runs to completion before the main application container starts. Init containers run sequentially — each must succeed before the next begins. If an init container fails, Kubernetes retries it until it succeeds. They are used for setup tasks: waiting for dependencies, running database migrations, preparing files, or setting permissions. The main container never starts until every init container has exited with code 0.
+
+2. **What is the difference between an init container and a sidecar container?** — An init container runs before the main container and exits when its task is done — it is not running while your app runs. A sidecar container runs alongside the main container at the same time — both are in the `containers` list in the pod spec. Sidecars are for ongoing tasks like log collection, metrics scraping, or service mesh proxies. Init containers are for one-time setup tasks before the app starts.
+
+3. **What happens if an init container fails?** — Kubernetes restarts the init container according to the pod's `restartPolicy`. For Deployments (restartPolicy: Always), a failing init container causes the pod to keep restarting the init container until it succeeds. The pod status shows `Init:CrashLoopBackOff`. The main container never starts. If the init container continues to fail, the pod stays in this state indefinitely until the underlying issue is fixed.
+
+4. **Can init containers share data with the main container?** — Yes, through shared volumes. Both the init container and the main container can mount the same volume (typically `emptyDir`). The init container writes data to the volume, exits, and then the main container reads from the same volume. This is how init containers pass config files, downloaded artifacts, or generated certificates to the main application.
+
+---
+
+## Q32. What are Resource Requests and Limits in Kubernetes?
+
+### The Simple Explanation
+
+When you run a container in Kubernetes, you need to tell Kubernetes two things:
+
+- **Request** — "I need at least this much CPU and memory to run properly." This is the minimum guaranteed amount.
+- **Limit** — "I must never use more than this much CPU and memory." This is the maximum cap.
+
+Think of it like booking a hotel room vs the maximum number of guests allowed:
+- **Request** = the room you booked — it is guaranteed for you, no one else can take it
+- **Limit** = the maximum occupancy sign on the door — you cannot exceed it no matter what
+
+### Why These Two Numbers Matter
+
+Without requests and limits:
+- The Scheduler has no idea how many resources a pod needs → it places pods randomly → nodes run out of memory → pods get killed
+- One misbehaving pod (memory leak) can consume all node memory → starves every other pod on that node → entire node becomes unstable
+
+With requests and limits:
+- The Scheduler makes smart placement decisions — it only puts a pod on a node that has enough free resources to satisfy the request
+- A runaway pod cannot consume more than its limit — it gets throttled (CPU) or killed (memory)
+
+### CPU vs Memory — They Work Differently
+
+**CPU (measured in millicores):**
+- `1000m` = 1 CPU core. `250m` = quarter of a core. `100m` = one tenth of a core.
+- CPU is **compressible** — if a pod tries to use more than its CPU limit, Kubernetes simply throttles it (slows it down). The pod keeps running, just slower. It is never killed for exceeding CPU limit.
+
+**Memory (measured in bytes — Mi, Gi):**
+- `128Mi` = 128 Megabytes. `1Gi` = 1 Gigabyte.
+- Memory is **incompressible** — you cannot "slow down" memory usage. If a pod exceeds its memory limit, Kubernetes immediately kills it with `OOMKilled` (Out Of Memory Killed) and restarts it.
+
+```
+CPU over limit  → throttled (slowed down, keeps running)
+RAM over limit  → OOMKilled (container killed immediately, restarts)
+```
+
+### How the Scheduler Uses Requests
+
+The Scheduler looks at **requests only** (not limits) when deciding which node to place a pod on. It compares the pod's request against each node's **allocatable** resources (total node capacity minus what's already reserved by running pods).
+
+```
+Node 1:  4 CPU total, 3.2 CPU already requested by running pods
+         → 0.8 CPU free
+
+Node 2:  4 CPU total, 1.5 CPU already requested by running pods
+         → 2.5 CPU free
+
+New pod request: 1 CPU
+
+Scheduler:
+  Node 1: 0.8 CPU free < 1 CPU needed → ❌ skip
+  Node 2: 2.5 CPU free ≥ 1 CPU needed → ✅ place here
+```
+
+This means a node can be "full" from the Scheduler's perspective (no more pods can be scheduled) even if actual CPU usage is low — because requests are reservations, not actual usage.
+
+### QoS Classes — What Kubernetes Assigns Based on Your Settings
+
+Kubernetes automatically assigns a Quality of Service (QoS) class to every pod based on its requests and limits. This class decides who gets killed first when a node runs out of memory.
+
+| QoS Class | Condition | Killed first? |
+|---|---|---|
+| **Guaranteed** | request = limit for ALL containers | Last to be killed — highest priority |
+| **Burstable** | request < limit (or only one is set) | Middle priority |
+| **BestEffort** | No requests or limits set at all | First to be killed — lowest priority |
+
+```
+# Guaranteed — request equals limit
+resources:
+  requests:
+    cpu: "500m"
+    memory: "256Mi"
+  limits:
+    cpu: "500m"      ← same as request
+    memory: "256Mi"  ← same as request
+
+# Burstable — request less than limit
+resources:
+  requests:
+    cpu: "250m"
+    memory: "128Mi"
+  limits:
+    cpu: "500m"      ← higher than request
+    memory: "256Mi"  ← higher than request
+
+# BestEffort — nothing set at all
+resources: {}        ← no requests, no limits
+```
+
+**Which to use:**
+- Use **Guaranteed** for critical services (databases, payment service) — you want them to survive node pressure
+- Use **Burstable** for most application services — they get a baseline but can burst if the node has spare capacity
+- **Never use BestEffort** in production — your pod will be the first thing killed when the node gets under pressure
+
+### YAML Example — AzureShop user-service
+
+```yaml
+containers:
+  - name: user-service
+    image: acrazureshopdev.azurecr.io/user-service:v1.0.0
+    resources:
+      requests:
+        cpu: "250m"      # guaranteed 0.25 CPU core
+        memory: "256Mi"  # guaranteed 256MB RAM
+      limits:
+        cpu: "500m"      # never use more than 0.5 CPU core
+        memory: "512Mi"  # never use more than 512MB RAM (OOMKilled if exceeded)
+```
+
+This makes user-service **Burstable** — it gets 0.25 CPU guaranteed but can burst to 0.5 CPU if the node has spare capacity.
+
+### What Happens Without Limits — A Real Danger
+
+Imagine user-service has a memory leak — it gradually consumes more and more RAM. Without a limit:
+
+```
+user-service starts at 256Mi RAM
+→ grows to 512Mi (other pods start getting less)
+→ grows to 1Gi (node memory pressure begins)
+→ grows to 2Gi (Kubernetes starts killing BestEffort pods on the node)
+→ grows to 3Gi (Kubernetes starts killing Burstable pods — your other services!)
+→ node becomes unresponsive
+```
+
+With a limit of `512Mi`:
+```
+user-service reaches 512Mi → OOMKilled → restarts
+→ other pods are completely unaffected
+→ at least you know user-service has a memory leak (check logs)
+```
+
+### In AzureShop — Resource Values for All Services
+
+```
+api-gateway:      requests: cpu=500m, memory=512Mi  | limits: cpu=1000m, memory=1Gi
+user-service:     requests: cpu=250m, memory=256Mi  | limits: cpu=500m,  memory=512Mi
+product-service:  requests: cpu=250m, memory=256Mi  | limits: cpu=500m,  memory=512Mi
+order-service:    requests: cpu=250m, memory=256Mi  | limits: cpu=500m,  memory=512Mi
+payment-service:  requests: cpu=500m, memory=256Mi  | limits: cpu=1000m, memory=512Mi
+frontend:         requests: cpu=100m, memory=128Mi  | limits: cpu=200m,  memory=256Mi
+Prometheus:       requests: cpu=500m, memory=1Gi    | limits: cpu=1000m, memory=2Gi
+Grafana:          requests: cpu=250m, memory=256Mi  | limits: cpu=500m,  memory=512Mi
+```
+
+All services are **Burstable** — they have a guaranteed baseline but can use more if the node has spare capacity. Payment service gets more CPU because it handles cryptographic operations.
+
+---
+
+### Interview Prep
+
+1. **What is the difference between a resource request and a resource limit?** — A request is the minimum amount of CPU or memory guaranteed to a container — the Scheduler uses requests to decide which node has enough free capacity to place the pod. A limit is the maximum a container can ever use — it is a hard cap. For CPU, exceeding the limit causes throttling (the container slows down). For memory, exceeding the limit causes the container to be immediately killed with OOMKilled and restarted. Requests are reservations; limits are caps.
+
+2. **What is OOMKilled and why does it happen?** — OOMKilled stands for Out Of Memory Killed. It happens when a container tries to use more memory than its configured limit. Unlike CPU (which can be throttled), memory cannot be compressed — you either have it or you don't. When a container crosses its memory limit, the Linux kernel's OOM Killer immediately terminates the container process. Kubernetes then restarts the container. If it keeps getting OOMKilled, check for memory leaks or increase the memory limit.
+
+3. **What are QoS classes in Kubernetes?** — Kubernetes automatically assigns a Quality of Service class to every pod based on its resource settings. Guaranteed means request equals limit for all containers — these pods are the last to be evicted when a node is under memory pressure. Burstable means request is less than limit — middle priority. BestEffort means no requests or limits are set at all — these pods are the first to be killed when the node needs to free memory. QoS class determines eviction order during node pressure.
+
+4. **How does the Scheduler use resource requests?** — The Scheduler uses requests (not actual usage, not limits) to determine whether a node has enough free capacity for a new pod. It sums up the requests of all running pods on a node and compares the remaining capacity against the new pod's request. A node is considered "full" when its total allocated requests exceed its allocatable capacity — even if actual CPU usage is low. This prevents nodes from being overcommitted on paper while actual usage fluctuates.
+
+5. **What happens if you don't set resource requests and limits?** — Without requests, the Scheduler places pods on any node without considering capacity — nodes can become overloaded. Without limits, a misbehaving pod (memory leak, CPU spike) can consume all node resources and starve or kill other pods on the same node. The pod gets QoS class BestEffort and will be the first evicted during node pressure. In production, always set both requests and limits for every container.
+
+---
+
+## Q33. What are Taints and Tolerations in Kubernetes?
+
+### The Simple Explanation
+
+A **Taint** is a label you put on a **node** that says "I am not available for regular pods — stay away unless you are specifically allowed."
+
+A **Toleration** is a permission you put on a **pod** that says "I am allowed to run on nodes with that taint."
+
+Together they control which pods are allowed on which nodes. By default, a tainted node repels all pods. Only pods that have the matching toleration can land on that node.
+
+### Real-life Analogy
+
+Think of a taint as a **"Staff Only" sign on a door**. Regular visitors (pods) cannot enter. Only staff members (pods with a toleration) who have the right badge (matching toleration) can go through that door.
+
+In AzureShop, the **system node pool** has a "Staff Only" sign — only Kubernetes system components (CoreDNS, metrics-server) are allowed there. Your application pods (user-service, product-service) do not have a staff badge, so they cannot enter the system node pool and land on the user/app node pool instead.
+
+### Taint Effects — Three Types
+
+When you taint a node, you choose one of three effects that decide what happens to pods that do NOT have the matching toleration:
+
+| Effect | What it does to pods WITHOUT the toleration |
+|---|---|
+| **NoSchedule** | New pods will NOT be scheduled on this node. Existing pods are NOT affected. |
+| **PreferNoSchedule** | Kubernetes will try to avoid scheduling pods here, but will do so if there is no other option. Soft rule. |
+| **NoExecute** | New pods will NOT be scheduled here AND existing pods without the toleration are evicted (removed) immediately. |
+
+```
+NoSchedule     → "No new pods allowed, existing pods stay"
+PreferNoSchedule → "Avoid if possible, but okay if no other node"
+NoExecute      → "No new pods AND kick out existing pods without toleration"
+```
+
+### How to Taint a Node
+
+```bash
+# Syntax: kubectl taint nodes <node-name> <key>=<value>:<effect>
+
+# Add a taint to the system node pool
+kubectl taint nodes aks-systempool-123 CriticalAddonsOnly=true:NoSchedule
+
+# Remove a taint (add a minus at the end)
+kubectl taint nodes aks-systempool-123 CriticalAddonsOnly=true:NoSchedule-
+```
+
+### How to Add a Toleration to a Pod
+
+A toleration in the pod spec says: "I can tolerate (survive on) a node with this taint."
+
+```yaml
+spec:
+  tolerations:
+    - key: "CriticalAddonsOnly"
+      operator: "Equal"
+      value: "true"
+      effect: "NoSchedule"
+```
+
+This pod can now be scheduled on any node with the taint `CriticalAddonsOnly=true:NoSchedule`.
+
+### Taints vs NodeSelector vs NodeAffinity — What is the Difference?
+
+People often confuse these three. They all control pod placement but in opposite directions:
+
+| Tool | Who controls it | Direction | Type |
+|---|---|---|---|
+| **Taint** | Set on the **node** | Node repels pods | Hard rule (NoSchedule) or eviction (NoExecute) |
+| **Toleration** | Set on the **pod** | Pod can tolerate the node's taint | Permission — "I am allowed" |
+| **NodeSelector** | Set on the **pod** | Pod requests a specific node label | Hard rule — only go to nodes with this label |
+| **NodeAffinity** | Set on the **pod** | Pod prefers or requires specific nodes | Hard or soft rule — more expressive than NodeSelector |
+
+**Simple rule of thumb:**
+- Use **Taints + Tolerations** to **push pods away** from nodes (node says "no regular pods")
+- Use **NodeSelector / NodeAffinity** to **pull pods toward** nodes (pod says "I want that specific node")
+- You often use BOTH together: taint the system pool (push apps away) AND use nodeAffinity on system pods (pull them toward system pool)
+
+### In AzureShop — System Pool vs App Pool
+
+AzureShop has two node pools. The system pool is for Kubernetes infrastructure only. The app pool is for your microservices. Here is exactly how taints and tolerations enforce this separation:
+
+**System node pool — tainted:**
+```bash
+# AKS automatically taints system node pools with this taint
+kubectl taint nodes aks-systempool-vmss000000 CriticalAddonsOnly=true:NoSchedule
+kubectl taint nodes aks-systempool-vmss000001 CriticalAddonsOnly=true:NoSchedule
+```
+
+**CoreDNS pods — have the toleration (allowed on system pool):**
+```yaml
+# CoreDNS toleration (set by AKS automatically)
+tolerations:
+  - key: CriticalAddonsOnly
+    operator: Exists    # tolerates any value for this key
+    effect: NoSchedule
+```
+
+**user-service pod — no toleration (blocked from system pool):**
+```yaml
+# user-service has no tolerations → cannot land on system pool
+# Scheduler skips system pool nodes → places on app pool nodes only
+containers:
+  - name: user-service
+    ...
+# no tolerations: section
+```
+
+**Result:**
+```
+System node pool nodes: tainted with CriticalAddonsOnly=true:NoSchedule
+  ✅ CoreDNS pod (has toleration) → allowed here
+  ✅ metrics-server pod (has toleration) → allowed here
+  ❌ user-service pod (no toleration) → blocked, goes to app pool
+  ❌ product-service pod (no toleration) → blocked, goes to app pool
+```
+
+### Another Real Use Case — Dedicated GPU Nodes
+
+If you add a GPU node to your cluster for AI workloads, you do not want regular pods wasting space on expensive GPU nodes. Taint the GPU node:
+
+```bash
+kubectl taint nodes gpu-node-1 gpu=true:NoSchedule
+```
+
+Only your AI/ML pods get a toleration:
+```yaml
+tolerations:
+  - key: "gpu"
+    operator: "Equal"
+    value: "true"
+    effect: "NoSchedule"
+```
+
+Regular pods cannot land on the GPU node. AI pods can. The expensive GPU node is reserved for the right workloads.
+
+### NoExecute — Evicting Existing Pods
+
+`NoExecute` is the strongest taint effect. When applied, it evicts any pod currently running on the node that does not have the matching toleration. This is useful when you want to drain a node for maintenance:
+
+```bash
+# Taint node for maintenance — evicts pods without toleration
+kubectl taint nodes aks-node-1 maintenance=true:NoExecute
+```
+
+All pods without `toleration: maintenance=true:NoExecute` are immediately evicted and rescheduled on other nodes. Kubernetes also uses `NoExecute` automatically when a node becomes `NotReady` — it evicts pods after a grace period (default 5 minutes) so they move to healthy nodes.
+
+---
+
+### Interview Prep
+
+1. **What is a taint in Kubernetes?** — A taint is a property applied to a node that tells the Scheduler to avoid scheduling pods on that node unless the pod has a matching toleration. Taints are used to reserve nodes for specific workloads, isolate system components from application workloads, or mark nodes for special purposes like GPU compute or maintenance. A taint has three parts: a key, a value, and an effect (NoSchedule, PreferNoSchedule, or NoExecute).
+
+2. **What is a toleration?** — A toleration is a property set on a pod that allows it to be scheduled on a node with a matching taint. A toleration does not guarantee the pod goes to that node — it just removes the barrier. The pod is still subject to normal Scheduler filtering (resource requests, affinity rules). Without a matching toleration, the pod cannot be scheduled on the tainted node.
+
+3. **What is the difference between NoSchedule and NoExecute?** — NoSchedule prevents new pods from being scheduled on the tainted node but does not affect pods already running there. NoExecute does both — it prevents new pods from landing AND immediately evicts any existing pods that do not have the matching toleration. NoExecute is used for node maintenance or when a node becomes unhealthy. NoSchedule is used for long-term node reservation.
+
+4. **What is the difference between taints/tolerations and nodeAffinity?** — Taints and tolerations work from the node's perspective — the node repels pods that don't have the right toleration. NodeAffinity works from the pod's perspective — the pod requests to be placed on nodes with specific labels. They are complementary: use taints to push unwanted pods away from a node, and use nodeAffinity to pull desired pods toward specific nodes. In AzureShop, the system node pool is tainted to push app pods away, and system pods use both tolerations (to get past the taint) and nodeAffinity (to actively prefer the system pool).
+
+5. **How does AKS use taints automatically?** — AKS automatically applies the taint `CriticalAddonsOnly=true:NoSchedule` to system node pools. This ensures that application workloads cannot accidentally land on system nodes, keeping them reserved for Kubernetes infrastructure components like CoreDNS and metrics-server. AKS also automatically applies `NoExecute` taints when a node becomes unhealthy or is being drained for an upgrade, triggering automatic pod eviction and rescheduling to healthy nodes.
+
+---
+
+## Q34. What is the Difference Between a StatefulSet and a Deployment?
+
+### The Simple Explanation
+
+Both StatefulSet and Deployment manage pods, but they are designed for completely different types of applications:
+
+- **Deployment** — for **stateless** applications. Every pod is identical and interchangeable. It does not matter which pod handles your request. If pod A dies and pod B takes over, nothing is lost. Examples: web servers, API services, frontend apps.
+
+- **StatefulSet** — for **stateful** applications. Every pod has a unique identity, a stable network name, and its own dedicated storage. Pod order matters. If pod A dies, when it comes back it must be pod A again — with the same data, same name, and same storage. Examples: databases (PostgreSQL, MongoDB), message queues (Kafka), distributed caches (Redis Cluster).
+
+### Real-life Analogy
+
+**Deployment = Fast food restaurant workers**
+In a fast food restaurant, every worker does the same job. If Worker #3 calls in sick, any replacement worker can step in and do exactly the same thing. No customer notices. The workers are identical and interchangeable.
+
+**StatefulSet = A specific doctor at a hospital**
+Dr. Smith has her own office (storage), her own patient records (persistent data), and her own appointment schedule. If Dr. Smith is away, you cannot just send in any random doctor — the patients need DR. SMITH specifically, with HER records. She has a unique identity that cannot be replaced by someone else.
+
+### The Key Differences
+
+| Feature | Deployment | StatefulSet |
+|---|---|---|
+| **Pod names** | Random: `user-svc-7d4f9b-abc12` | Ordered: `postgres-0`, `postgres-1`, `postgres-2` |
+| **Pod identity** | Disposable — any pod is the same | Stable — each pod has a unique, permanent identity |
+| **Storage** | Shared or no persistent storage | Each pod gets its OWN PersistentVolumeClaim |
+| **Scaling up** | All pods start simultaneously | Pods start in order: 0 → 1 → 2 |
+| **Scaling down** | Any pod is deleted | Pods deleted in reverse order: 2 → 1 → 0 |
+| **Updates** | All pods updated simultaneously (rolling) | Pods updated in reverse order: 2 → 1 → 0 |
+| **DNS** | One Service ClusterIP for all pods | Each pod gets its own DNS name |
+| **Use case** | APIs, web servers, microservices | Databases, Kafka, ZooKeeper, Redis Cluster |
+
+### Pod Naming — The Biggest Visible Difference
+
+```bash
+# Deployment pods — random suffix, no order
+kubectl get pods -n dev
+user-service-7d4f9b-abc12    Running
+user-service-7d4f9b-xyz99    Running
+user-service-7d4f9b-pqr55    Running
+# Any of these can die and be replaced by a new random name
+
+# StatefulSet pods — ordered, numbered, stable names
+kubectl get pods -n dev
+postgres-0    Running   ← primary (master)
+postgres-1    Running   ← replica 1
+postgres-2    Running   ← replica 2
+# postgres-0 always comes back as postgres-0 — same name, same storage
+```
+
+### Stable Network Identity — Each Pod Gets Its Own DNS Name
+
+A StatefulSet requires a **Headless Service** (a Service with `clusterIP: None`). A regular Service gives one shared IP for all pods. A Headless Service gives each pod its own individual DNS name:
+
+```
+Regular Service (Deployment):
+  user-service → 10.0.12.5 (single ClusterIP, load-balanced)
+
+Headless Service (StatefulSet):
+  postgres-0.postgres-headless.dev.svc.cluster.local → 10.240.0.10 (pod 0 directly)
+  postgres-1.postgres-headless.dev.svc.cluster.local → 10.240.0.11 (pod 1 directly)
+  postgres-2.postgres-headless.dev.svc.cluster.local → 10.240.0.12 (pod 2 directly)
+```
+
+Why does this matter for databases? Because a database cluster has specific roles:
+- `postgres-0` is the **primary** — accepts writes
+- `postgres-1` and `postgres-2` are **replicas** — handle reads
+
+The application must know which pod is the primary (to write) and which are replicas (to read). With a regular Service you cannot target a specific pod. With a Headless Service and StatefulSet, you can address `postgres-0` directly and always know it is the primary.
+
+### Each Pod Gets Its Own PersistentVolumeClaim
+
+In a Deployment, if you mount a PVC, all pods share the same volume. In a StatefulSet, each pod gets its OWN dedicated volume — they are never shared:
+
+```yaml
+# StatefulSet volumeClaimTemplates
+volumeClaimTemplates:
+  - metadata:
+      name: postgres-data
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      storageClassName: managed-premium
+      resources:
+        requests:
+          storage: 20Gi
+```
+
+Kubernetes automatically creates:
+```
+postgres-data-postgres-0  → 20Gi Azure Disk (attached to postgres-0 only)
+postgres-data-postgres-1  → 20Gi Azure Disk (attached to postgres-1 only)
+postgres-data-postgres-2  → 20Gi Azure Disk (attached to postgres-2 only)
+```
+
+When `postgres-1` is deleted and recreated, it automatically reconnects to `postgres-data-postgres-1` — its own disk with its own data. The data is never lost.
+
+### Ordered Startup and Shutdown
+
+StatefulSets start pods in strict order and wait for each pod to be Running and Ready before starting the next:
+
+```
+Scale up postgres to 3 replicas:
+  postgres-0 starts → waits until Running + Ready
+  postgres-1 starts → waits until Running + Ready
+  postgres-2 starts → waits until Running + Ready
+
+Scale down from 3 to 1:
+  postgres-2 deleted → waits until fully terminated
+  postgres-1 deleted → waits until fully terminated
+  postgres-0 stays  ← always the last one standing (primary)
+```
+
+This ordering is critical for databases. The primary (`postgres-0`) must start first so replicas can connect to it. On scale-down, replicas are removed first to avoid losing the primary.
+
+### YAML Comparison
+
+```yaml
+# Deployment — stateless user-service
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: user-service
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: user-service
+  template:
+    spec:
+      containers:
+        - name: user-service
+          image: acrazureshopdev.azurecr.io/user-service:v1.0.0
+
+---
+# StatefulSet — stateful PostgreSQL
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+spec:
+  serviceName: postgres-headless   # must reference a headless service
+  replicas: 3
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:15
+          volumeMounts:
+            - name: postgres-data
+              mountPath: /var/lib/postgresql/data
+  volumeClaimTemplates:            # each pod gets its own PVC
+    - metadata:
+        name: postgres-data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        storageClassName: managed-premium
+        resources:
+          requests:
+            storage: 20Gi
+```
+
+### In AzureShop
+
+AzureShop uses:
+- **Deployments** for all 6 microservices (user, product, order, payment, api-gateway, frontend) — they are all stateless. They read from databases but do not store state themselves.
+- **StatefulSets** (future Phase 6 work) for PostgreSQL (user and order data), MongoDB (product catalog), Redis (session cache), and Cosmos DB is used as managed service — no StatefulSet needed for that.
+- **Prometheus** uses a StatefulSet (even though it is monitoring, not a database) because it needs a stable PVC for its metrics store and a predictable pod name.
+
+---
+
+### Interview Prep
+
+1. **What is the difference between a StatefulSet and a Deployment?** — A Deployment manages stateless pods that are identical and interchangeable — pod names are random, any pod can serve any request, and there is no per-pod storage. A StatefulSet manages stateful pods that have unique identities — pod names are ordered and stable (postgres-0, postgres-1), each pod has its own dedicated PersistentVolumeClaim, and pods start and stop in a defined order. Use Deployments for APIs and web services; use StatefulSets for databases, message queues, and any application where individual pod identity matters.
+
+2. **What is a Headless Service and why do StatefulSets need one?** — A Headless Service is a Service with `clusterIP: None`. A regular Service gives all pods a single shared IP and load-balances traffic between them — you cannot target an individual pod. A Headless Service gives each StatefulSet pod its own stable DNS name (e.g., `postgres-0.postgres-headless.namespace.svc.cluster.local`). This allows clients to target a specific pod directly — essential for databases where you must distinguish the primary (writes) from replicas (reads).
+
+3. **What happens to a StatefulSet pod's data when the pod is deleted?** — The pod is recreated with the same name and the same PersistentVolumeClaim. The PVC is not deleted when the pod is deleted — it stays in the cluster. When the new pod starts, Kubernetes automatically rebinds it to its original PVC. So `postgres-1` is deleted, a new `postgres-1` pod starts, and it reconnects to `postgres-data-postgres-1` — finding all its data intact. This is the core value of StatefulSets: persistent, pod-specific storage that survives pod restarts.
+
+4. **When would you use a StatefulSet over a Deployment?** — Use a StatefulSet when your application needs: (1) stable, unique pod identities that persist across restarts; (2) per-pod dedicated persistent storage that is not shared with other pods; (3) ordered, controlled startup and shutdown sequences; or (4) stable network hostnames so other services can address individual pods directly. Databases (PostgreSQL, MongoDB, MySQL), distributed systems (Kafka, ZooKeeper, Elasticsearch), and stateful caches (Redis Cluster) are the classic use cases. If your app is stateless and any instance can serve any request, use a Deployment.
+
+---
+
+## Q35. What is a DaemonSet in Kubernetes and When Do You Use It?
+
+### The Simple Explanation
+
+A DaemonSet is a Kubernetes object that ensures **exactly one copy of a pod runs on every node in the cluster** (or every node that matches a selector). When a new node is added to the cluster, the DaemonSet automatically starts a pod on it. When a node is removed, the pod on it is automatically cleaned up.
+
+You do not control "how many replicas" with a DaemonSet — the count is always equal to the number of nodes. If you have 5 nodes, you have 5 DaemonSet pods. Add a 6th node, a 6th pod starts automatically.
+
+### Real-life Analogy
+
+Think of a cleaning crew in a large office building. The company rule is: **every floor must have exactly one cleaner working at all times**. When a new floor is added to the building, a cleaner is automatically assigned. When a floor is closed, the cleaner is reassigned.
+
+You do not say "I want 5 cleaners" — you say "one per floor, always." The number of cleaners automatically matches the number of floors. That is exactly how a DaemonSet works — one pod per node, always.
+
+### Deployment vs DaemonSet vs StatefulSet — Quick Comparison
+
+| Object | How many pods? | Who decides count? | Use case |
+|---|---|---|---|
+| **Deployment** | You set replicas (e.g., 3) | You | Stateless apps: APIs, web servers |
+| **StatefulSet** | You set replicas (e.g., 3) | You | Stateful apps: databases, queues |
+| **DaemonSet** | One per node (automatic) | Number of nodes | Node-level agents: monitoring, logging, networking |
+
+### What DaemonSets Are Used For
+
+DaemonSets are always for **node-level infrastructure tasks** — things that every node must run independently, not things that need to be distributed across a few pods:
+
+**1. Log Collection**
+Every node generates logs from its containers. A log collector (like Fluentd or Fluent Bit) must run on every node to pick up those logs and ship them to a central log store (like Azure Monitor or Elasticsearch). It cannot run on just one node — it would only see logs from that one node.
+
+**2. Metrics and Monitoring**
+Node Exporter (Prometheus) scrapes CPU, memory, disk, and network metrics from each node. To get data from all nodes, it must run on all of them. One pod per node = complete coverage.
+
+**3. Networking Plugins (CNI)**
+Azure CNI runs as a DaemonSet. It sets up the network interface for every pod on the node. It must be on every node because it operates at the node's network level.
+
+**4. Security Agents**
+Antivirus, vulnerability scanners, or intrusion detection agents must run on every node to protect every node. A DaemonSet ensures no node is left unprotected.
+
+**5. Storage Drivers**
+The Azure Disk CSI Driver runs as a DaemonSet (specifically the `node` component). It must be on every node to manage the disk attachment process for pods scheduled on that node.
+
+### DaemonSet YAML Example — Fluent Bit Log Collector
+
+```yaml
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: fluent-bit
+  namespace: monitoring
+spec:
+  selector:
+    matchLabels:
+      app: fluent-bit
+  template:
+    metadata:
+      labels:
+        app: fluent-bit
+    spec:
+      tolerations:
+        - key: CriticalAddonsOnly    # allow on system nodes too
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: fluent-bit
+          image: fluent/fluent-bit:2.1
+          volumeMounts:
+            - name: varlog
+              mountPath: /var/log       # read container logs from node
+            - name: varlibdockercontainers
+              mountPath: /var/lib/docker/containers
+              readOnly: true
+      volumes:
+        - name: varlog
+          hostPath:
+            path: /var/log            # mount the actual node filesystem
+        - name: varlibdockercontainers
+          hostPath:
+            path: /var/lib/docker/containers
+```
+
+Notice `hostPath` — DaemonSet pods often mount directories directly from the node's filesystem because they are operating at the node level, not just inside a container.
+
+### DaemonSet on Specific Nodes Only
+
+You do not have to run a DaemonSet on ALL nodes. You can use a `nodeSelector` or `nodeAffinity` to target only specific nodes:
+
+```yaml
+spec:
+  template:
+    spec:
+      nodeSelector:
+        agentpool: workerpool    # only run on app pool nodes, not system pool
+```
+
+This is useful when you have GPU nodes — you might run a GPU monitoring DaemonSet only on GPU nodes, not on regular CPU nodes.
+
+### How DaemonSets Handle New Nodes
+
+```
+Day 1: Cluster has 2 nodes
+  DaemonSet pods: fluent-bit on Node-1, fluent-bit on Node-2
+
+Day 2: Cluster autoscaler adds Node-3 (load increased)
+  DaemonSet controller sees new node
+  Automatically creates: fluent-bit on Node-3
+  No manual action needed
+
+Day 3: Node-2 is drained and deleted
+  DaemonSet controller sees node gone
+  Automatically cleans up: fluent-bit pod on Node-2 deleted
+  Remaining: fluent-bit on Node-1, fluent-bit on Node-3
+```
+
+This automatic lifecycle management is the key advantage of DaemonSets over manually managing one Deployment per node.
+
+### In AzureShop — DaemonSets Running in the Cluster
+
+AzureShop's AKS cluster runs these DaemonSets (most managed automatically by AKS):
+
+| DaemonSet | Namespace | Purpose |
+|---|---|---|
+| `azure-cni-networkmonitor` | kube-system | Azure CNI network plugin on every node |
+| `csi-azuredisk-node` | kube-system | Azure Disk CSI driver node component — manages disk attachments |
+| `csi-azurefile-node` | kube-system | Azure File CSI driver node component |
+| `kube-proxy` | kube-system | iptables networking rules for Services on every node |
+| `omsagent` | kube-system | Azure Monitor agent — collects metrics and logs from every node |
+| `fluent-bit` | monitoring | Ships container logs to Azure Log Analytics (added by AzureShop Phase 7) |
+| `node-exporter` | monitoring | Prometheus node metrics scraper on every node (Phase 7) |
+
+All the `kube-system` ones are managed by AKS automatically. The `monitoring` namespace DaemonSets are deployed by AzureShop as part of the Prometheus/Grafana monitoring stack in Phase 7.
+
+### What kubectl Shows for a DaemonSet
+
+```bash
+kubectl get daemonset -n kube-system
+
+NAME                    DESIRED  CURRENT  READY  UP-TO-DATE  AVAILABLE  NODE SELECTOR
+kube-proxy              3        3        3      3           3          <none>
+csi-azuredisk-node      3        3        3      3           3          <none>
+omsagent                3        3        3      3           3          <none>
+
+# DESIRED always equals the number of nodes (3 nodes → 3 desired)
+# No "replicas" field — count is automatic
+```
+
+---
+
+### Interview Prep
+
+1. **What is a DaemonSet and how is it different from a Deployment?** — A DaemonSet ensures exactly one pod runs on every node in the cluster (or a subset of nodes). The pod count automatically matches the node count — you do not set replicas. A Deployment runs a fixed number of replicas that the Scheduler places anywhere in the cluster. Use a DaemonSet for node-level agents that need to run on every machine (log collectors, monitoring agents, network plugins). Use a Deployment for application workloads where you control the replica count and placement does not matter.
+
+2. **What are common use cases for a DaemonSet?** — The most common use cases are: log collection agents (Fluent Bit, Fluentd) that must collect logs from every node's container log directory; node monitoring agents (Prometheus Node Exporter) that scrape hardware metrics from every node; network plugins (CNI agents like Azure CNI) that configure pod networking on each node; storage drivers (CSI node agents) that manage disk attachments on each node; and security agents (vulnerability scanners, intrusion detection) that must inspect every node. Any tool that operates at the node level rather than the application level is a DaemonSet candidate.
+
+3. **What happens to a DaemonSet pod when a new node is added to the cluster?** — The DaemonSet controller watches for new nodes. When a new node is added (manually or by the Cluster Autoscaler), the DaemonSet controller automatically creates a new pod on that node — no manual action required. Similarly, when a node is removed, the DaemonSet pod on that node is automatically cleaned up. This automatic lifecycle management is what makes DaemonSets the right tool for node-level agents — you never have to manually scale them.
+
+4. **Can a DaemonSet run on specific nodes only?** — Yes. You can use a `nodeSelector` or `nodeAffinity` in the DaemonSet pod spec to restrict it to nodes with specific labels. For example, you might run a GPU monitoring DaemonSet only on nodes with the label `gpu=true`. You can also combine this with tolerations — if the target nodes are tainted, the DaemonSet pods need the matching toleration to be scheduled there. By default (no nodeSelector), the DaemonSet runs on all nodes in the cluster.
+
+5. **How does kube-proxy use a DaemonSet?** — kube-proxy is itself deployed as a DaemonSet in the `kube-system` namespace. It needs to run on every node because it programs iptables rules locally on each node for Service networking. If kube-proxy ran as a regular Deployment on just one or two nodes, only those nodes would have the correct routing rules — pods on other nodes could not reach Services. Running as a DaemonSet guarantees every node has up-to-date networking rules at all times.
 
