@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File), Kubernetes Ingress (Ingress resource vs Ingress Controller, NGINX Ingress, path-based routing, TLS termination, canary deployments, how AzureShop routes traffic through Application Gateway → NGINX → api-gateway → services), Full Kubernetes Architecture (Control Plane components: API Server, etcd, Scheduler, Controller Manager, Cloud Controller Manager — Worker Node components: kubelet, kube-proxy, Container Runtime, Pods — end-to-end flow of kubectl apply, AzureShop AKS architecture mapping), Init Containers (purpose, sequencing, real-world use cases, AzureShop examples), Resource Requests and Limits (CPU/memory requests vs limits, how Scheduler uses them, OOMKilled, QoS classes, AzureShop values), Taints and Tolerations (what they are, taint effects, how AzureShop system node pool uses them, NodeSelector vs NodeAffinity vs Taints), StatefulSet vs Deployment (ordered pods, stable network identity, headless Service, when to use each, AzureShop databases), DaemonSet (one pod per node guarantee, use cases, how AzureShop uses DaemonSets for monitoring and CSI).
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File), Kubernetes Ingress (Ingress resource vs Ingress Controller, NGINX Ingress, path-based routing, TLS termination, canary deployments, how AzureShop routes traffic through Application Gateway → NGINX → api-gateway → services), Full Kubernetes Architecture (Control Plane components: API Server, etcd, Scheduler, Controller Manager, Cloud Controller Manager — Worker Node components: kubelet, kube-proxy, Container Runtime, Pods — end-to-end flow of kubectl apply, AzureShop AKS architecture mapping), Init Containers (purpose, sequencing, real-world use cases, AzureShop examples), Resource Requests and Limits (CPU/memory requests vs limits, how Scheduler uses them, OOMKilled, QoS classes, AzureShop values), Taints and Tolerations (what they are, taint effects, how AzureShop system node pool uses them, NodeSelector vs NodeAffinity vs Taints), StatefulSet vs Deployment (ordered pods, stable network identity, headless Service, when to use each, AzureShop databases), DaemonSet (one pod per node guarantee, use cases, how AzureShop uses DaemonSets for monitoring and CSI), Kubernetes Troubleshooting (CrashLoopBackOff diagnosis and fix, Pending pod causes, OOMKilled detection and resolution, ImagePullBackOff and ErrImagePull, Terminating pod stuck, Service not routing traffic to pods, Node NotReady — full kubectl debugging commands for each scenario with AzureShop examples).
 
 ---
 
@@ -42,6 +42,13 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 33. [What are Taints and Tolerations in Kubernetes?](#q33-what-are-taints-and-tolerations-in-kubernetes)
 34. [What is the Difference Between a StatefulSet and a Deployment?](#q34-what-is-the-difference-between-a-statefulset-and-a-deployment)
 35. [What is a DaemonSet in Kubernetes and When Do You Use It?](#q35-what-is-a-daemonset-in-kubernetes-and-when-do-you-use-it)
+36. [How Do You Troubleshoot a Pod Stuck in CrashLoopBackOff?](#q36-how-do-you-troubleshoot-a-pod-stuck-in-crashloopbackoff)
+37. [How Do You Troubleshoot a Pod Stuck in Pending State?](#q37-how-do-you-troubleshoot-a-pod-stuck-in-pending-state)
+38. [How Do You Troubleshoot OOMKilled?](#q38-how-do-you-troubleshoot-oomkilled)
+39. [How Do You Troubleshoot ImagePullBackOff and ErrImagePull?](#q39-how-do-you-troubleshoot-imagepullbackoff-and-errimagepull)
+40. [How Do You Troubleshoot a Pod Stuck in Terminating State?](#q40-how-do-you-troubleshoot-a-pod-stuck-in-terminating-state)
+41. [How Do You Troubleshoot When a Service is Not Routing Traffic to Pods?](#q41-how-do-you-troubleshoot-when-a-service-is-not-routing-traffic-to-pods)
+42. [How Do You Troubleshoot a Node in NotReady State?](#q42-how-do-you-troubleshoot-a-node-in-notready-state)
 
 ---
 
@@ -8043,4 +8050,951 @@ omsagent                3        3        3      3           3          <none>
 4. **Can a DaemonSet run on specific nodes only?** — Yes. You can use a `nodeSelector` or `nodeAffinity` in the DaemonSet pod spec to restrict it to nodes with specific labels. For example, you might run a GPU monitoring DaemonSet only on nodes with the label `gpu=true`. You can also combine this with tolerations — if the target nodes are tainted, the DaemonSet pods need the matching toleration to be scheduled there. By default (no nodeSelector), the DaemonSet runs on all nodes in the cluster.
 
 5. **How does kube-proxy use a DaemonSet?** — kube-proxy is itself deployed as a DaemonSet in the `kube-system` namespace. It needs to run on every node because it programs iptables rules locally on each node for Service networking. If kube-proxy ran as a regular Deployment on just one or two nodes, only those nodes would have the correct routing rules — pods on other nodes could not reach Services. Running as a DaemonSet guarantees every node has up-to-date networking rules at all times.
+
+
+---
+
+## Q36. How Do You Troubleshoot a Pod Stuck in CrashLoopBackOff?
+
+### What CrashLoopBackOff Means
+
+CrashLoopBackOff is not an error by itself — it is Kubernetes telling you: "I am trying to start this container, it keeps crashing immediately after starting, and I am going to keep retrying but with increasing delays (back-off) between each attempt."
+
+The back-off delay starts at 10 seconds and doubles each time: 10s → 20s → 40s → 80s → 160s → 300s (max). This is why the pod stays stuck — it crashes, Kubernetes waits, restarts, it crashes again, Kubernetes waits longer, and so on.
+
+### Real-life Analogy
+
+Imagine a car that stalls every time you try to start it. You keep turning the key, it runs for 2 seconds, then dies. A mechanic (Kubernetes) keeps trying to start it but waits a bit longer each time before trying again — giving you time to diagnose the problem. The car is not broken beyond repair — something specific is wrong that you need to find and fix.
+
+### The 5 Most Common Causes
+
+| Cause | What happens | How to spot it |
+|---|---|---|
+| **Application error on startup** | App throws exception immediately at launch | Check logs — error in first few lines |
+| **Missing environment variable or config** | App reads an env var that does not exist → crashes | Logs show "undefined", "null", "config not found" |
+| **Cannot connect to database** | App tries to connect at startup, fails, exits | Logs show "connection refused" or timeout |
+| **Wrong command or entrypoint** | The command in the container spec does not exist | Logs show "executable not found" or empty |
+| **Liveness probe too aggressive** | App is slow to start, liveness probe kills it before it is ready | Pod restarts with no error in app logs |
+
+### Step-by-Step Debugging Commands
+
+```bash
+# Step 1 — See all pods and spot the CrashLoopBackOff
+kubectl get pods -n dev
+
+NAME                            READY   STATUS             RESTARTS   AGE
+user-service-7d4f9b-abc12      0/1     CrashLoopBackOff   5          8m
+# RESTARTS=5 means it has crashed and restarted 5 times already
+
+# Step 2 — Describe the pod to see events and last state
+kubectl describe pod user-service-7d4f9b-abc12 -n dev
+
+# Look for these sections in the output:
+# "Last State" → shows exit code of last crash
+# "Events" → shows what Kubernetes did and any warnings
+# Exit code 1 = application error
+# Exit code 137 = OOMKilled (killed by kernel — out of memory)
+# Exit code 139 = segfault (memory corruption)
+
+# Step 3 — Read the logs of the crashed container
+kubectl logs user-service-7d4f9b-abc12 -n dev
+
+# If the container has already restarted, read logs from the PREVIOUS crash:
+kubectl logs user-service-7d4f9b-abc12 -n dev --previous
+
+# --previous is very important — without it you might only see logs from
+# the latest restart attempt which may not have enough output yet
+
+# Step 4 — Check environment variables and mounted secrets/configmaps
+kubectl exec -it user-service-7d4f9b-abc12 -n dev -- env
+# (only works if container is currently running — may need to catch it)
+
+# Alternative — describe to see what env vars and volumes are mounted
+kubectl describe pod user-service-7d4f9b-abc12 -n dev | grep -A 20 "Environment"
+kubectl describe pod user-service-7d4f9b-abc12 -n dev | grep -A 20 "Mounts"
+```
+
+### Reading the Logs — What to Look For
+
+```
+# Example 1 — Missing environment variable
+Error: DATABASE_URL is not defined
+    at Object.<anonymous> (/app/config.js:5:15)
+→ Fix: check ConfigMap or Secret has DATABASE_URL key
+
+# Example 2 — Cannot connect to database
+Error: connect ECONNREFUSED 10.0.12.8:5432
+→ Fix: database service not running, wrong host, wrong port
+
+# Example 3 — Wrong command
+exec: "node": executable file not found in $PATH
+→ Fix: wrong image, or command in YAML is wrong
+
+# Example 4 — Application exception
+TypeError: Cannot read property 'url' of undefined
+→ Fix: a config value is undefined — missing env var or wrong key name
+```
+
+### Liveness Probe Too Aggressive — A Sneaky Cause
+
+If your app takes 30 seconds to start (e.g., it warms up a cache or runs migrations) but your liveness probe checks every 10 seconds with a failure threshold of 3, Kubernetes kills the pod at 30 seconds (3 × 10s) — right when the app is about to be ready.
+
+```yaml
+# Bad — too aggressive for a slow-starting app
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3001
+  initialDelaySeconds: 10   # only waits 10s before first check
+  periodSeconds: 10
+  failureThreshold: 3       # kills after 3 failures = 30s total
+
+# Good — give the app time to start
+livenessProbe:
+  httpGet:
+    path: /health
+    port: 3001
+  initialDelaySeconds: 30   # wait 30s before first check
+  periodSeconds: 10
+  failureThreshold: 3
+```
+
+### In AzureShop
+
+If `user-service` is in CrashLoopBackOff, the first commands to run are:
+
+```bash
+kubectl logs user-service-<pod-id> -n dev --previous
+kubectl describe pod user-service-<pod-id> -n dev
+```
+
+The most likely causes in AzureShop are:
+1. Key Vault CSI mount failed → secret not available → app crashes on missing config
+2. Database connection string wrong → app cannot connect at startup
+3. ACR image pull issue → wrong image tag → container never starts
+
+---
+
+### Interview Prep
+
+1. **What is CrashLoopBackOff?** — CrashLoopBackOff means a container keeps starting and crashing immediately, and Kubernetes is retrying with increasing delays (back-off) between restarts. It is not a Kubernetes error — it is a signal that something inside the container is causing it to exit. The back-off starts at 10 seconds and doubles up to 5 minutes. To diagnose it: check `kubectl logs <pod> --previous` for the crash reason, and `kubectl describe pod` for the last exit code and events.
+
+2. **What is the most important kubectl command when a pod is in CrashLoopBackOff?** — `kubectl logs <pod-name> -n <namespace> --previous`. The `--previous` flag is critical — without it you see logs from the current (possibly empty) restart attempt, not the crash that caused the problem. The previous container's logs show the actual error that caused the exit. Combined with `kubectl describe pod` to see the exit code, these two commands reveal almost every CrashLoopBackOff cause.
+
+3. **What does exit code 137 mean in a pod?** — Exit code 137 means the container was killed by the Linux kernel's OOM (Out Of Memory) Killer. This happens when the container exceeds its memory limit. The kernel sends a SIGKILL signal (which cannot be caught or ignored) and the process dies immediately. In Kubernetes this shows as OOMKilled in `kubectl describe pod`. The fix is either to increase the memory limit or find and fix the memory leak in the application.
+
+---
+
+## Q37. How Do You Troubleshoot a Pod Stuck in Pending State?
+
+### What Pending Means
+
+A pod in Pending state means Kubernetes has accepted the pod (it is saved in etcd) but the Scheduler has NOT been able to place it on any node yet. The pod has not started, no container has been pulled, nothing is running. Kubernetes is stuck at the very first step — finding a node to put the pod on.
+
+### Real-life Analogy
+
+Imagine you book a hotel room online — your booking is confirmed (pod is in etcd). But when you arrive, the receptionist says "I'm sorry, all rooms that match your requirements are full right now. Please wait." You are stuck in the lobby (Pending) until a suitable room becomes available. The issue is not with you — the issue is with room availability.
+
+### The 4 Most Common Causes
+
+| Cause | What it means | How to spot it |
+|---|---|---|
+| **Insufficient CPU or memory** | No node has enough free resources to meet the pod's requests | Events: "Insufficient cpu" or "Insufficient memory" |
+| **No nodes match the nodeSelector / nodeAffinity** | Pod requires a node label that no node has | Events: "didn't match node selector" |
+| **Taint not tolerated** | All matching nodes are tainted and pod has no toleration | Events: "had taints that the pod didn't tolerate" |
+| **PersistentVolumeClaim not bound** | Pod needs a PVC that does not exist or is stuck | Events: "persistentvolumeclaim not found" |
+
+### Step-by-Step Debugging Commands
+
+```bash
+# Step 1 — See the pod is Pending
+kubectl get pods -n dev
+
+NAME                            READY   STATUS    RESTARTS   AGE
+user-service-7d4f9b-abc12      0/1     Pending   0          5m
+# AGE keeps growing but RESTARTS stays 0 — nothing is even starting
+
+# Step 2 — Describe the pod — this is the MOST IMPORTANT command for Pending
+kubectl describe pod user-service-7d4f9b-abc12 -n dev
+
+# Scroll to the bottom — look at the Events section:
+Events:
+  Warning  FailedScheduling  30s  default-scheduler
+    0/3 nodes are available:
+    1 Insufficient cpu.         ← Node 1: not enough CPU
+    2 node(s) had taints that the pod didn't tolerate.  ← Nodes 2 and 3: tainted
+```
+
+### Diagnosing Each Cause
+
+**Cause 1 — Not enough CPU or Memory:**
+```bash
+# Check how much is already allocated on each node
+kubectl describe nodes | grep -A 5 "Allocated resources"
+
+# Output example:
+Allocated resources:
+  CPU:     3800m / 4000m  (95%)   ← almost full
+  Memory:  6Gi / 8Gi     (75%)
+
+# Fix options:
+# 1. Scale down other pods to free resources
+# 2. Add more nodes (scale node pool up in Azure)
+# 3. Reduce the pod's resource requests if they are too high
+```
+
+**Cause 2 — nodeSelector not matching:**
+```bash
+# Check what nodeSelector the pod needs
+kubectl describe pod user-service-7d4f9b-abc12 -n dev | grep -A 3 "Node-Selectors"
+
+# Check what labels nodes actually have
+kubectl get nodes --show-labels
+
+# If the required label is missing from all nodes, the pod will never be scheduled
+# Fix: add the label to a node OR remove/fix the nodeSelector in the pod spec
+kubectl label nodes aks-workerpool-node1 agentpool=workerpool
+```
+
+**Cause 3 — Taint not tolerated:**
+```bash
+# Check taints on all nodes
+kubectl describe nodes | grep -A 2 "Taints"
+
+# Output:
+Taints: CriticalAddonsOnly=true:NoSchedule
+
+# Fix: add the matching toleration to the pod spec, OR
+# schedule on a different (untainted) node pool
+```
+
+**Cause 4 — PVC not bound:**
+```bash
+# Check PVC status
+kubectl get pvc -n dev
+
+NAME                  STATUS    VOLUME   CAPACITY   STORAGECLASS
+prometheus-data-pvc   Pending   <none>   <none>     managed-premium
+# STATUS = Pending means the PVC has not been bound to a volume yet
+
+# Describe the PVC for more detail
+kubectl describe pvc prometheus-data-pvc -n dev
+
+# Common causes:
+# - StorageClass does not exist
+# - Azure Disk quota exceeded
+# - Wrong access mode (ReadWriteMany requested but Azure Disk only supports ReadWriteOnce)
+```
+
+### In AzureShop
+
+If a pod is Pending in AzureShop, the most likely causes are:
+
+1. **Node pool is too small** — all 2 nodes are full. Fix: scale node pool to 3 in Azure Portal or via `az aks nodepool scale`
+2. **Wrong nodeSelector** — pod has `agentpool: systempool` but should be `workerpool`
+3. **Cluster Autoscaler is provisioning a new node** — wait 2-3 minutes, node is being created automatically
+
+```bash
+# Check if Cluster Autoscaler is working
+kubectl get events -n kube-system | grep -i "scale"
+# You should see: "Successfully added node" if autoscaler is working
+```
+
+---
+
+### Interview Prep
+
+1. **What does a Pending pod mean?** — A Pending pod means the Scheduler has not been able to place the pod on any node. The pod exists in etcd (Kubernetes accepted it) but no container has started. The Scheduler is continuously trying to find a suitable node but failing because of insufficient resources, taint restrictions, node selector mismatches, or unbound PVCs. The fix starts with `kubectl describe pod` — the Events section at the bottom tells you exactly why the Scheduler is rejecting every node.
+
+2. **What is the most useful command for a Pending pod?** — `kubectl describe pod <name> -n <namespace>`. Scroll to the Events section at the bottom. The Scheduler writes a specific message for every node it considered and why it rejected it — "Insufficient cpu", "node(s) had taints that the pod didn't tolerate", "didn't match node selector". This gives you a precise diagnosis rather than guessing. `kubectl logs` is useless for Pending pods because no container has started yet.
+
+3. **How is a Pending pod different from a CrashLoopBackOff pod?** — A Pending pod has never started — the Scheduler cannot find a node for it. The problem is infrastructure: not enough resources, wrong labels, taint restrictions. A CrashLoopBackOff pod has been placed on a node and is starting repeatedly but crashing each time. The problem is inside the application: a bug, missing config, or failed dependency. Pending = scheduling problem. CrashLoopBackOff = application problem.
+
+---
+
+## Q38. How Do You Troubleshoot OOMKilled?
+
+### What OOMKilled Means
+
+OOMKilled stands for **Out Of Memory Killed**. It means your container tried to use more memory than its configured memory limit, and the Linux kernel killed the container process immediately to protect the node. The kernel sends a SIGKILL signal (cannot be caught — the process dies instantly, no cleanup, no graceful shutdown).
+
+Kubernetes then restarts the container — but if the memory leak is still there, it will be OOMKilled again and again, entering CrashLoopBackOff.
+
+### Real-life Analogy
+
+Think of memory limit as the **fuel tank size** in a car. Your car (container) has a 50-litre tank (memory limit). If you try to put in 60 litres, the petrol overflows and causes a hazard — the safety system (kernel) immediately shuts the engine down to prevent damage. The car restarts but if you keep trying to overfill it, it keeps shutting down.
+
+### How to Spot OOMKilled
+
+```bash
+# Step 1 — Check pod status
+kubectl get pods -n dev
+
+NAME                            READY   STATUS             RESTARTS   AGE
+user-service-7d4f9b-abc12      0/1     OOMKilled          3          10m
+# or it may show CrashLoopBackOff if it keeps restarting
+
+# Step 2 — Describe the pod — look at "Last State"
+kubectl describe pod user-service-7d4f9b-abc12 -n dev
+
+# Look for this section:
+Last State:     Terminated
+  Reason:       OOMKilled       ← this is the key indicator
+  Exit Code:    137             ← exit code 137 always means OOMKilled
+  Started:      Mon, 23 Jun 2026 09:00:00
+  Finished:     Mon, 23 Jun 2026 09:02:30
+
+# Also look at:
+Limits:
+  memory: 512Mi    ← container was limited to 512MB
+Requests:
+  memory: 256Mi
+```
+
+### Finding the Root Cause — Was It a Spike or a Leak?
+
+OOMKilled has two different root causes and they need different fixes:
+
+**Type 1 — Memory Spike (one-time burst):**
+The app normally uses 400MB but had a sudden spike to 600MB (e.g., processing a large file, large database query result, sudden traffic surge). The limit of 512MB was too low for this spike.
+
+```
+Fix: Increase the memory limit to handle legitimate spikes
+  limits:
+    memory: "1Gi"   # increase from 512Mi to 1Gi
+```
+
+**Type 2 — Memory Leak (gradual growth):**
+The app starts at 100MB but slowly climbs: 200MB → 300MB → 400MB → 512MB → OOMKilled. The app is not releasing memory it no longer needs. This is a code bug.
+
+```
+Fix: Find and fix the memory leak in the application code
+     (increasing the limit just delays the next OOMKill)
+```
+
+### How to Tell Which Type It Is
+
+```bash
+# Check how long the pod was running before it was OOMKilled
+kubectl describe pod user-service-7d4f9b-abc12 -n dev | grep -E "Started|Finished|OOMKilled"
+
+# If it ran for 2 minutes → likely a spike (happened on specific operation)
+# If it ran for 6 hours → likely a memory leak (gradual growth)
+
+# Check memory usage metrics (if metrics-server is running)
+kubectl top pods -n dev
+
+NAME                            CPU(cores)   MEMORY(bytes)
+user-service-7d4f9b-abc12      45m          498Mi
+# 498Mi with a 512Mi limit → dangerously close, about to OOMKill again
+```
+
+### Checking Memory Usage Over Time in AzureShop
+
+In AzureShop, Prometheus and Grafana (Phase 7) will show memory usage graphs. But even without them, you can check:
+
+```bash
+# Watch live memory usage
+kubectl top pods -n dev --sort-by=memory
+
+# Check node-level memory pressure
+kubectl describe nodes | grep -A 5 "Conditions"
+# Look for:
+# MemoryPressure: True  ← node itself is running low on memory
+```
+
+### Full Diagnosis Checklist for OOMKilled
+
+```
+1. kubectl describe pod <name> -n dev
+   → Confirm "Reason: OOMKilled" and "Exit Code: 137"
+   → Note the memory limit
+
+2. kubectl top pods -n dev
+   → See current memory usage of all pods
+   → Is this pod consistently near its limit?
+
+3. kubectl logs <pod> --previous -n dev
+   → Look for any memory-related errors before the kill
+   → "heap out of memory", "FATAL ERROR: CALL_AND_RETRY_LAST"
+
+4. Check pod age vs restart count
+   → Long age + many restarts = memory leak
+   → Short age + few restarts = spike
+
+5. Decision:
+   → Spike: increase limit
+   → Leak: fix code, then increase limit as temporary measure
+```
+
+### In AzureShop — OOMKilled Scenarios
+
+```bash
+# payment-service was OOMKilled — it processes large order batches
+kubectl describe pod payment-service-xxx -n dev
+# Last State: OOMKilled, Exit Code: 137, Limit: 512Mi
+
+# Temporary fix — increase limit in Helm values
+# helm/values/dev.yaml
+paymentService:
+  resources:
+    limits:
+      memory: "1Gi"   # increased from 512Mi
+
+# Apply the fix
+helm upgrade azureshop-dev ./helm/charts/payment-service \
+  -f helm/values/dev.yaml \
+  -n dev
+```
+
+---
+
+### Interview Prep
+
+1. **What is OOMKilled and what causes it?** — OOMKilled (Out Of Memory Killed) happens when a container exceeds its configured memory limit. The Linux kernel's OOM Killer sends a SIGKILL signal to the container process, killing it instantly with no graceful shutdown. Exit code 137 always indicates OOMKilled. It is caused either by a legitimate memory spike (the limit is too low for peak usage) or a memory leak (the app gradually consumes more memory until it hits the limit). You confirm it with `kubectl describe pod` — look for "Reason: OOMKilled" in the Last State section.
+
+2. **What is the difference between a memory spike and a memory leak?** — A spike is a sudden, temporary surge in memory usage triggered by a specific operation (large file processing, big query result, traffic burst). After the operation, memory returns to normal. The fix is to increase the memory limit. A leak is gradual growth over time — the app allocates memory but never releases it. The app starts normal but memory keeps climbing until it hits the limit. The fix is to find and fix the bug in the code (increasing the limit only delays the next crash). You can distinguish them by how long the pod ran before being OOMKilled: minutes = likely spike, hours = likely leak.
+
+3. **What kubectl commands do you use to troubleshoot OOMKilled?** — First, `kubectl describe pod <name> -n <namespace>` to confirm OOMKilled in the Last State section and check the memory limit. Second, `kubectl top pods -n <namespace>` to see current memory usage and how close pods are to their limits. Third, `kubectl logs <pod> --previous -n <namespace>` to check for memory-related errors just before the kill. Fourth, check node conditions with `kubectl describe nodes` to see if the node itself has MemoryPressure — which would cause OOMKills across multiple pods regardless of their individual limits.
+
+---
+
+## Q39. How Do You Troubleshoot ImagePullBackOff and ErrImagePull?
+
+### What These Errors Mean
+
+Both errors mean Kubernetes could not pull (download) the container image from the registry. They always appear together:
+
+- **ErrImagePull** — the very first failure. Kubernetes tried to pull the image and it failed.
+- **ImagePullBackOff** — Kubernetes is now waiting before trying again (back-off). After each failed attempt the wait time increases.
+
+In short: Kubernetes cannot get the container image, so the container can never start.
+
+### Real-life Analogy
+
+Think of it like ordering a package online. The delivery driver (kubelet) tries to pick up your package (container image) from the warehouse (container registry). The delivery fails because either:
+- The package does not exist at that address (wrong image name or tag)
+- The warehouse is locked and the driver has no key (authentication failure)
+- The warehouse is temporarily closed (registry is down or unreachable)
+
+Until the package arrives, the delivery driver keeps trying — but waits longer between each attempt (BackOff).
+
+### The 4 Most Common Causes
+
+| Cause | Error message clue | Fix |
+|---|---|---|
+| **Wrong image name or tag** | `manifest unknown`, `not found` | Fix the image name or tag in the deployment |
+| **Image tag does not exist** | `tag does not exist` | Push the correct image tag to the registry |
+| **Authentication failure** | `unauthorized`, `403 Forbidden` | Fix imagePullSecret or Managed Identity permissions |
+| **Registry unreachable** | `dial tcp: connection refused`, timeout | Check network, VNet, firewall rules |
+
+### Step-by-Step Debugging Commands
+
+```bash
+# Step 1 — Spot the error
+kubectl get pods -n dev
+
+NAME                            READY   STATUS             RESTARTS   AGE
+user-service-7d4f9b-abc12      0/1     ImagePullBackOff   0          3m
+
+# Step 2 — Describe the pod — events section tells you exactly what failed
+kubectl describe pod user-service-7d4f9b-abc12 -n dev
+
+# Look at the Events section:
+Events:
+  Warning  Failed     2m    kubelet
+    Failed to pull image "acrazureshopdev.azurecr.io/user-service:v2.0.0":
+    rpc error: code = Unknown
+    desc = failed to pull and unpack image:
+    failed to resolve reference "acrazureshopdev.azurecr.io/user-service:v2.0.0":
+    unexpected status code 404 Not Found
+    ← Tag v2.0.0 does not exist in ACR
+
+  Warning  BackOff    1m    kubelet
+    Back-off pulling image "acrazureshopdev.azurecr.io/user-service:v2.0.0"
+```
+
+### Diagnosing Each Cause
+
+**Cause 1 — Wrong image name or tag:**
+```bash
+# Check what image the pod is trying to pull
+kubectl describe pod user-service-xxx -n dev | grep "Image:"
+# Image: acrazureshopdev.azurecr.io/user-service:v2.0.0
+
+# Check what tags actually exist in ACR
+az acr repository show-tags \
+  --name acrazureshopdev \
+  --repository user-service \
+  --output table
+
+# Output:
+Result
+--------
+v1.0.0    ← only v1.0.0 exists, v2.0.0 does not!
+
+# Fix: update the image tag in your Helm values to v1.0.0
+```
+
+**Cause 2 — Authentication failure (most common in AKS):**
+```bash
+# Check if the kubelet identity has ACR pull permission
+az role assignment list \
+  --assignee <kubelet-identity-client-id> \
+  --scope /subscriptions/<sub-id>/resourceGroups/rg-azureshopdev/providers/Microsoft.ContainerRegistry/registries/acrazureshopdev \
+  --query "[].roleDefinitionName"
+
+# Expected output: ["AcrPull"]
+# If empty: the kubelet identity does not have permission to pull from ACR
+
+# Fix: assign AcrPull role
+az aks update \
+  --resource-group rg-azureshopdev \
+  --name azureshop-aks-dev \
+  --attach-acr acrazureshopdev
+```
+
+**Cause 3 — Registry unreachable from AKS:**
+```bash
+# Check if the AKS node can reach ACR
+# (run a debug pod on the node)
+kubectl run debug --image=busybox --restart=Never -n dev -- \
+  sh -c "nslookup acrazureshopdev.azurecr.io"
+
+# If DNS fails → VNet DNS or Private Endpoint issue
+# If DNS works but connection times out → NSG or firewall blocking port 443
+```
+
+### In AzureShop
+
+AzureShop uses **Managed Identity** (kubelet identity) to pull images from ACR — no passwords needed. So ImagePullBackOff in AzureShop almost always means:
+
+1. **Wrong tag** — a pipeline built an image as `v1.2.3` but the Helm values still say `v1.2.2`
+2. **ACR attach was not done** — `az aks update --attach-acr` was never run after AKS was created
+3. **Image was never pushed** — the CI pipeline failed before the push step
+
+```bash
+# Quick check — list all images in ACR
+az acr repository list --name acrazureshopdev --output table
+
+# Check a specific repo's tags
+az acr repository show-tags --name acrazureshopdev --repository user-service --output table
+```
+
+---
+
+### Interview Prep
+
+1. **What is the difference between ErrImagePull and ImagePullBackOff?** — ErrImagePull is the initial failure — Kubernetes tried to pull the image once and it failed. ImagePullBackOff is the follow-up state — Kubernetes is now waiting (backing off) before retrying, with increasing delays between attempts. They always appear together for the same root cause. The actual error details are in `kubectl describe pod` under Events — ErrImagePull events show the specific failure message (404 not found, 403 unauthorized, timeout) that tells you exactly what is wrong.
+
+2. **What are the most common causes of ImagePullBackOff in AKS?** — The most common causes are: wrong image name or tag (the image simply does not exist in the registry at that name); missing ACR pull permission on the kubelet Managed Identity (AKS uses Managed Identity to authenticate to ACR without passwords — if the AcrPull role assignment is missing, every pull fails with 401 Unauthorized); and network connectivity issues (ACR is behind a Private Endpoint but the AKS VNet has no private DNS zone configured, so name resolution fails). The Events section in `kubectl describe pod` gives the exact HTTP error code which immediately tells you which cause you are dealing with.
+
+3. **How does AKS authenticate to ACR without a password?** — AKS uses the kubelet's Managed Identity to pull images from ACR. The kubelet identity is granted the `AcrPull` role on the ACR resource. When containerd needs to pull an image, it uses the kubelet identity to get an Azure AD token, which it presents to ACR as the authentication credential. No username, no password, no imagePullSecret needed. This is set up by running `az aks update --attach-acr <acr-name>` which creates the role assignment automatically.
+
+---
+
+## Q40. How Do You Troubleshoot a Pod Stuck in Terminating State?
+
+### What Terminating Means
+
+When you delete a pod (`kubectl delete pod` or during a rolling update), Kubernetes puts the pod in Terminating state and starts a graceful shutdown sequence. The pod should disappear within 30 seconds (the default `terminationGracePeriodSeconds`). If the pod is stuck in Terminating for minutes or hours, something is blocking the shutdown.
+
+### Real-life Analogy
+
+Think of closing a shop at the end of the day. You tell all staff "time to go home" (SIGTERM signal). Normally, staff finish what they are doing, lock up, and leave within 30 minutes. But if one staff member is stuck on the phone with a customer who will not hang up (a finalizer or a blocked process), the shop cannot close. The manager eventually has to say "everyone out NOW" — which is the equivalent of force-deleting the pod.
+
+### The Graceful Shutdown Sequence
+
+```
+kubectl delete pod user-service-xxx
+    ↓
+Kubernetes sends SIGTERM to the container
+    ↓
+App should catch SIGTERM and shut down cleanly
+    ↓
+Kubernetes waits up to terminationGracePeriodSeconds (default: 30s)
+    ↓
+If app is still running after 30s → SIGKILL (force kill)
+    ↓
+Pod is removed
+```
+
+If the pod is still Terminating after this sequence, the problem is usually a **finalizer** that has not been removed.
+
+### The 3 Most Common Causes
+
+| Cause | What it means | Fix |
+|---|---|---|
+| **Finalizer not removed** | A controller added a finalizer to the pod and is not removing it | Remove the finalizer manually |
+| **App not handling SIGTERM** | App ignores SIGTERM and keeps running until SIGKILL | Fix app to handle SIGTERM gracefully |
+| **Namespace stuck in Terminating** | The entire namespace is being deleted but some resources are stuck | Remove finalizers from the namespace |
+
+### Step-by-Step Debugging Commands
+
+```bash
+# Step 1 — Spot the stuck pod
+kubectl get pods -n dev
+
+NAME                            READY   STATUS        RESTARTS   AGE
+user-service-7d4f9b-abc12      0/1     Terminating   0          45m
+# Stuck for 45 minutes — this is not normal
+
+# Step 2 — Check for finalizers
+kubectl get pod user-service-7d4f9b-abc12 -n dev -o yaml | grep -A 5 "finalizers"
+
+# If output shows:
+finalizers:
+  - foregroundDeletion
+  - some-controller/cleanup
+# → finalizers are blocking deletion
+
+# Step 3 — Force delete (last resort, use carefully)
+kubectl delete pod user-service-7d4f9b-abc12 -n dev --force --grace-period=0
+
+# --force --grace-period=0 skips the graceful period and removes the pod immediately
+# Use this ONLY when normal deletion is stuck — it bypasses cleanup
+```
+
+### Removing a Finalizer Manually (Safer Approach)
+
+```bash
+# Edit the pod and remove the finalizers field
+kubectl patch pod user-service-7d4f9b-abc12 -n dev \
+  -p '{"metadata":{"finalizers":[]}}' \
+  --type=merge
+
+# Once finalizers are removed, Kubernetes proceeds with deletion automatically
+```
+
+### Namespace Stuck in Terminating
+
+```bash
+# Check if a whole namespace is stuck
+kubectl get namespaces
+
+NAME        STATUS        AGE
+dev         Terminating   2h   ← namespace stuck in Terminating
+
+# Check what resources are blocking it
+kubectl api-resources --verbs=list --namespaced -o name | \
+  xargs -I{} kubectl get {} -n dev 2>/dev/null | grep -v "No resources"
+
+# Remove finalizers from the namespace itself
+kubectl patch namespace dev \
+  -p '{"metadata":{"finalizers":[]}}' \
+  --type=merge
+```
+
+### In AzureShop
+
+Pods in AzureShop can get stuck in Terminating when:
+1. A pod has a `preStop` hook that hangs (e.g., calls an endpoint that is unreachable)
+2. The CSI Driver finalizer is not cleaned up when a pod with a Key Vault CSI mount is deleted
+3. A rolling update leaves an old pod stuck because it cannot drain connections
+
+```yaml
+# Properly configured preStop hook with timeout (prevents hanging)
+lifecycle:
+  preStop:
+    exec:
+      command: ["/bin/sh", "-c", "sleep 5"]  # small delay for connections to drain
+
+terminationGracePeriodSeconds: 30  # always set explicitly
+```
+
+---
+
+### Interview Prep
+
+1. **What does a Terminating pod mean and why does it get stuck?** — A Terminating pod is in the process of graceful shutdown. Kubernetes sends SIGTERM to the container and waits up to `terminationGracePeriodSeconds` (default 30 seconds) for it to exit cleanly. A pod gets stuck in Terminating when a finalizer — a marker set by a controller that signals "I have cleanup work to do before this pod can be deleted" — is not being removed. The pod cannot be fully deleted until all its finalizers are cleared. The fix is either to wait for the controller to do its cleanup, remove the finalizer manually with `kubectl patch`, or force-delete with `--force --grace-period=0` as a last resort.
+
+2. **What is a finalizer in Kubernetes?** — A finalizer is a key in the pod's (or any resource's) metadata that tells Kubernetes "do not actually delete this object until this finalizer is removed." A controller adds a finalizer when it creates a resource so it can do cleanup (releasing cloud resources, unregistering from a service mesh, etc.) before the object disappears. When the controller finishes its cleanup, it removes the finalizer, and Kubernetes proceeds with deletion. If the controller crashes or the finalizer is never removed, the object stays in a Terminating state indefinitely.
+
+3. **When should you use `kubectl delete pod --force --grace-period=0`?** — Only as a last resort when a pod has been stuck in Terminating for an unusually long time (more than a few minutes) and you have confirmed that forceful removal will not cause data corruption or service disruption. Force deletion removes the pod object from etcd immediately without waiting for graceful shutdown — the container process might still be running on the node briefly. Never use it on database pods or any stateful pods without understanding the data consistency implications. For most stuck pods in AzureShop (stateless microservices), force deletion is safe.
+
+---
+
+## Q41. How Do You Troubleshoot When a Service is Not Routing Traffic to Pods?
+
+### What the Problem Looks Like
+
+Your pods are Running, your Service exists, but when you try to reach the Service (from another pod or from outside), the connection fails, times out, or returns an error. The pods are healthy but somehow traffic is not reaching them.
+
+### Real-life Analogy
+
+Think of a call centre. The receptionists (pods) are all at their desks and ready to take calls. The company's phone number (Service) exists. But somehow when customers call, the phone just rings and no one picks up. The problem is in the call routing system — either the wrong phone numbers are programmed in (wrong selector), the receptionists are not logged into the phone system (pods not Ready), or the phone line itself is broken (wrong port).
+
+### The 4 Most Common Causes
+
+| Cause | What happens | How to spot it |
+|---|---|---|
+| **Selector mismatch** | Service labels do not match pod labels | `kubectl get endpoints` shows no addresses |
+| **Wrong port** | Service port does not match container port | Connection refused or wrong port |
+| **Pods not Ready** | Pods are Running but readiness probe failing | Endpoints list is empty |
+| **NetworkPolicy blocking** | A network policy is denying the traffic | Connection times out (not refused) |
+
+### Step-by-Step Debugging Commands
+
+```bash
+# Step 1 — Check the Service exists and has endpoints
+kubectl get svc user-service -n dev
+kubectl get endpoints user-service -n dev
+
+# Healthy output:
+NAME           ENDPOINTS                       AGE
+user-service   10.240.0.7:3001,10.240.0.8:3001   5m
+# → 2 pod IPs listed = Service is routing to 2 pods ✅
+
+# Broken output:
+NAME           ENDPOINTS   AGE
+user-service   <none>      5m
+# → No endpoints = Service cannot find any matching pods ❌
+# This is the most important clue — <none> means selector mismatch or pods not Ready
+```
+
+**If Endpoints shows `<none>` — check the selector:**
+```bash
+# Check what selector the Service uses
+kubectl describe svc user-service -n dev | grep -A 3 "Selector"
+# Selector: app=user-service, version=v1
+
+# Check what labels the pods actually have
+kubectl get pods -n dev --show-labels
+# NAME                       LABELS
+# user-service-7d4f9b-abc12  app=user-svc,version=v1
+#                                   ↑
+# "user-svc" does not match "user-service" → selector mismatch!
+
+# Fix: correct the label in the Deployment or the selector in the Service
+```
+
+**If Endpoints has IPs but traffic still fails — check ports:**
+```bash
+# Check Service port vs container port
+kubectl describe svc user-service -n dev | grep -E "Port|TargetPort"
+# Port:       3001/TCP
+# TargetPort: 3000/TCP   ← targeting port 3000
+
+kubectl describe pod user-service-xxx -n dev | grep "Port"
+# Port: 3001/TCP          ← container is actually listening on 3001
+
+# TargetPort 3000 ≠ Container port 3001 → connection will fail
+# Fix: set targetPort: 3001 in the Service spec
+```
+
+**Test connectivity directly from inside the cluster:**
+```bash
+# Run a temporary debug pod and curl the Service
+kubectl run debug --image=curlimages/curl --restart=Never -n dev -- \
+  curl -v http://user-service:3001/health
+
+# If this works → problem is outside (Ingress, client config)
+# If this fails → problem is inside (Service, pods, NetworkPolicy)
+
+# Also try curling the pod IP directly (bypasses Service/kube-proxy)
+kubectl run debug --image=curlimages/curl --restart=Never -n dev -- \
+  curl -v http://10.240.0.7:3001/health
+# If pod IP works but Service IP does not → kube-proxy/iptables issue
+```
+
+**Check for NetworkPolicy blocking:**
+```bash
+# List all NetworkPolicies in the namespace
+kubectl get networkpolicy -n dev
+
+# Describe each one to see ingress/egress rules
+kubectl describe networkpolicy default-deny-all -n dev
+
+# If a "deny all" policy exists and the allowing policy has a wrong selector,
+# traffic will silently time out
+```
+
+### In AzureShop
+
+The most common Service routing issue in AzureShop is a **selector mismatch introduced by a typo in Helm values**. AzureShop uses Helm templates so all labels flow from `values.yaml`. If the label in the Deployment template does not match the Service selector template, endpoints will be empty.
+
+```bash
+# Full diagnosis flow for AzureShop:
+kubectl get endpoints -n dev          # check all services at once
+kubectl get pods -n dev --show-labels # verify pod labels
+kubectl describe svc user-service -n dev | grep Selector
+```
+
+---
+
+### Interview Prep
+
+1. **How do you start debugging when a Kubernetes Service is not working?** — Start with `kubectl get endpoints <service-name> -n <namespace>`. If endpoints shows `<none>`, the Service cannot find any pods — the selector does not match any pod labels or all matching pods are not Ready. If endpoints shows pod IPs, the Service is finding the pods correctly and the problem is with ports, NetworkPolicies, or application-level issues. Endpoints is the single most diagnostic piece of information for Service routing problems.
+
+2. **What is a selector mismatch and how do you fix it?** — A selector mismatch happens when the labels defined in a Service's `selector` field do not exactly match the labels on the pods. Even a small typo (like `app: user-svc` vs `app: user-service`) means the Service finds zero matching pods and the Endpoints object is empty. You diagnose it by comparing `kubectl describe svc <name>` (shows the Selector) with `kubectl get pods --show-labels` (shows actual pod labels). The fix is to correct either the Service selector or the pod labels so they match exactly.
+
+3. **What is the difference between a Service port and a targetPort?** — The `port` is what the Service listens on — what other pods use to reach the Service (e.g., `user-service:3001`). The `targetPort` is what the Service forwards traffic to — the port the container is actually listening on inside the pod. These can be different: a Service might listen on port 80 but forward to `targetPort: 3001` where the Node.js app runs. If `targetPort` is wrong (does not match the container's actual listening port), the Service will route traffic to the correct pod but the connection will fail because nothing is listening on that port inside the container.
+
+---
+
+## Q42. How Do You Troubleshoot a Node in NotReady State?
+
+### What NotReady Means
+
+A Node in NotReady state means the node (the virtual machine) is not functioning correctly and Kubernetes cannot place new pods on it or trust the pods running there. The Control Plane (specifically the Node Controller) has lost communication with the kubelet on that node — the node has stopped sending its regular heartbeat.
+
+After a node stays NotReady for 5 minutes (default), Kubernetes automatically evicts all pods from it and reschedules them on healthy nodes.
+
+### Real-life Analogy
+
+Think of a worker (node) who has not reported to work and is not responding to calls (heartbeat). The manager (Node Controller) marks them as unavailable and reassigns their tasks (pods) to other workers. The manager does not know WHY they are unavailable — it just knows they have gone silent. Finding out why requires checking on the worker directly.
+
+### The 4 Most Common Causes
+
+| Cause | What happens | How to spot it |
+|---|---|---|
+| **kubelet stopped or crashed** | Node stopped sending heartbeats | SSH to node, check kubelet service |
+| **Node out of memory / disk** | OS-level resource exhaustion | Node conditions show MemoryPressure or DiskPressure |
+| **Network issue** | Node cannot reach the API Server | Node is reachable via SSH but API Server cannot see it |
+| **VM stopped or crashed** | Azure VM is stopped or rebooting | Azure Portal shows VM as deallocated or stopped |
+
+### Step-by-Step Debugging Commands
+
+```bash
+# Step 1 — See which nodes are NotReady
+kubectl get nodes
+
+NAME                         STATUS     ROLES   AGE   VERSION
+aks-workerpool-node1         Ready      agent   5d    v1.28.0
+aks-workerpool-node2         NotReady   agent   5d    v1.28.0  ← problem node
+aks-systempool-node1         Ready      agent   5d    v1.28.0
+
+# Step 2 — Describe the node — check Conditions and Events
+kubectl describe node aks-workerpool-node2
+
+# Look at the Conditions section:
+Conditions:
+  Type                Status   Reason                       Message
+  ----                ------   ------                       -------
+  MemoryPressure      False    KubeletHasSufficientMemory   kubelet has sufficient memory
+  DiskPressure        True     KubeletHasDiskPressure       disk usage is above threshold  ← PROBLEM
+  PIDPressure         False    KubeletHasSufficientPID      kubelet has sufficient PID
+  Ready               False    KubeletNotReady              container runtime is not ready
+
+# DiskPressure: True → the node's disk is full
+# This stops the kubelet from working → node goes NotReady
+```
+
+### Diagnosing Each Cause
+
+**Cause 1 — DiskPressure (disk full):**
+```bash
+# The node's disk is full — usually from container image layers or logs
+# Fix in AKS: Azure automatically handles this but you can force a node image upgrade
+az aks nodepool upgrade \
+  --resource-group rg-azureshopdev \
+  --cluster-name azureshop-aks-dev \
+  --name workerpool \
+  --node-image-only
+
+# Or cordon the node, drain it, then delete and let autoscaler replace it
+kubectl cordon aks-workerpool-node2      # stop new pods going here
+kubectl drain aks-workerpool-node2 \     # move existing pods to other nodes
+  --ignore-daemonsets \
+  --delete-emptydir-data
+```
+
+**Cause 2 — MemoryPressure:**
+```bash
+kubectl describe node aks-workerpool-node2 | grep -A 2 "MemoryPressure"
+# MemoryPressure: True → node is running out of RAM
+
+# Check what is using memory on the node
+kubectl top pods -n dev --sort-by=memory
+# Find the pod consuming the most memory — likely an OOMKill candidate
+
+# Fix: evict the heavy pod or scale up the node pool
+```
+
+**Cause 3 — VM stopped in Azure:**
+```bash
+# Check VM status in Azure
+az vm list \
+  --resource-group rg-azureshopdev-aks-nodes \
+  --query "[].{Name:name, PowerState:powerState}" \
+  --show-details \
+  --output table
+
+# If PowerState = "VM deallocated" → start the VM
+az vm start \
+  --resource-group rg-azureshopdev-aks-nodes \
+  --name <vm-name>
+```
+
+**Cause 4 — kubelet stopped:**
+```bash
+# In AKS you cannot SSH to nodes by default
+# Use a privileged debug pod on the node:
+kubectl debug node/aks-workerpool-node2 -it --image=mcr.microsoft.com/cbl-mariner/busybox:2.0
+
+# Inside the debug pod:
+chroot /host
+systemctl status kubelet
+# If kubelet is stopped:
+systemctl start kubelet
+systemctl enable kubelet
+```
+
+### What Kubernetes Does Automatically
+
+When a node goes NotReady, Kubernetes does not just sit and wait:
+
+```
+Node goes NotReady
+    ↓ (after 40 seconds of no heartbeat)
+Node Controller marks node as NotReady
+    ↓ (after 5 minutes = pod-eviction-timeout)
+Node Controller adds "NoExecute" taint to the node:
+  node.kubernetes.io/not-ready:NoExecute
+    ↓
+All pods WITHOUT the not-ready toleration are evicted
+    ↓
+Evicted pods are rescheduled on healthy nodes
+    ↓ (if Cluster Autoscaler is enabled)
+If remaining nodes are full, Cluster Autoscaler provisions a new node
+```
+
+Most system pods (CoreDNS, CSI drivers) have tolerations for `not-ready:NoExecute` with a `tolerationSeconds` — they stay on the node for a bit waiting for it to recover before being evicted.
+
+### In AzureShop
+
+```bash
+# Full NotReady diagnosis for AzureShop:
+
+# 1. Check all nodes
+kubectl get nodes
+
+# 2. Describe the NotReady node
+kubectl describe node <node-name>
+
+# 3. Check pods that were evicted
+kubectl get pods -n dev | grep Evicted
+
+# 4. Check Cluster Autoscaler logs (did it try to replace the node?)
+kubectl logs -n kube-system -l app=cluster-autoscaler --tail=50
+
+# 5. Check Azure VM status
+az vmss list-instances \
+  --resource-group rg-azureshopdev-aks-nodes \
+  --name <vmss-name> \
+  --query "[].{ID:instanceId, State:provisioningState}" \
+  --output table
+```
+
+---
+
+### Interview Prep
+
+1. **What does a NotReady node mean in Kubernetes?** — A NotReady node means the kubelet on that node has stopped sending heartbeats to the API Server. The Control Plane's Node Controller marks the node as NotReady after about 40 seconds of missed heartbeats. After 5 minutes of NotReady status, Kubernetes automatically adds a `NoExecute` taint to the node and evicts all pods that do not tolerate it, rescheduling them on healthy nodes. The root cause is found with `kubectl describe node` — check the Conditions section for MemoryPressure, DiskPressure, or kubelet status.
+
+2. **What is the difference between cordoning and draining a node?** — Cordoning marks a node as unschedulable — no new pods will be placed on it, but existing pods continue running. It is used when you want to prevent new workloads while you investigate. Draining does cordoning AND evicts all existing pods from the node, causing them to be rescheduled elsewhere. Draining is used before node maintenance, upgrades, or deletion. Always drain before deleting a node to avoid abrupt pod termination. Use `--ignore-daemonsets` because DaemonSet pods cannot be evicted (they are tied to the node).
+
+3. **What does Kubernetes do automatically when a node goes NotReady?** — After approximately 40 seconds of no heartbeat, the Node Controller marks the node as NotReady and records this in etcd. After 5 minutes (the default pod eviction timeout), it automatically adds a `node.kubernetes.io/not-ready:NoExecute` taint to the node. Any pod without a matching toleration is immediately evicted and the ReplicaSet Controller reschedules those pods on healthy nodes. If the Cluster Autoscaler is enabled and remaining nodes are full, it will automatically provision a new node from Azure to accommodate the evicted pods.
+
+4. **What kubectl command do you use first when a node is NotReady?** — `kubectl describe node <node-name>`. Look at the Conditions section — it shows whether the node has MemoryPressure, DiskPressure, or PIDPressure, and what the Ready condition reason is. The Events section at the bottom shows recent activity on the node. Then check `kubectl get pods -A -o wide | grep <node-name>` to see what pods were running on the affected node and whether they have been rescheduled. In AKS, also check the Azure Portal or `az vm list` to confirm the underlying VM is still running.
 
