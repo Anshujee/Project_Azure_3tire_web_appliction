@@ -1,7 +1,7 @@
 # Phase 6 — AKS Kubernetes: Question Bank
 
 All questions asked during revision, with full detailed answers.
-Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File), Kubernetes Ingress (Ingress resource vs Ingress Controller, NGINX Ingress, path-based routing, TLS termination, canary deployments, how AzureShop routes traffic through Application Gateway → NGINX → api-gateway → services), Full Kubernetes Architecture (Control Plane components: API Server, etcd, Scheduler, Controller Manager, Cloud Controller Manager — Worker Node components: kubelet, kube-proxy, Container Runtime, Pods — end-to-end flow of kubectl apply, AzureShop AKS architecture mapping), Init Containers (purpose, sequencing, real-world use cases, AzureShop examples), Resource Requests and Limits (CPU/memory requests vs limits, how Scheduler uses them, OOMKilled, QoS classes, AzureShop values), Taints and Tolerations (what they are, taint effects, how AzureShop system node pool uses them, NodeSelector vs NodeAffinity vs Taints), StatefulSet vs Deployment (ordered pods, stable network identity, headless Service, when to use each, AzureShop databases), DaemonSet (one pod per node guarantee, use cases, how AzureShop uses DaemonSets for monitoring and CSI), Kubernetes Troubleshooting (CrashLoopBackOff diagnosis and fix, Pending pod causes, OOMKilled detection and resolution, ImagePullBackOff and ErrImagePull, Terminating pod stuck, Service not routing traffic to pods, Node NotReady — full kubectl debugging commands for each scenario with AzureShop examples).
+Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, PodDisruptionBudget, Azure CNI vs Kubenet, kubelogin, Key Vault CSI Driver, kubelet identity vs CSI addon identity, system vs user node pools, Helm vs kubectl apply, HPA, NetworkPolicy zero trust, Kubernetes Secret vs SecretProviderClass, Workload Identity, Kubernetes Nodes and Cluster architecture, Node Pools and types, Zero Downtime deployments, ConfigMap and Secret, Azure CNI deep dive, Azure AD and Azure RBAC for AKS, Managed Identity vs Service Principal, k8s folder structure, Azure VNet Service Endpoints vs Kubernetes Endpoints, Service Endpoint vs Service Principal, Kubernetes Controllers (built-in vs managed), Reconciliation Loop, Cloud Controller Manager, Custom Controllers / Operator Pattern, Labels and Selectors (matchLabels, matchExpressions, pod-to-service wiring, Helm template labels), Kubernetes RBAC (Role, ClusterRole, RoleBinding, ClusterRoleBinding, ServiceAccount, Azure RBAC vs K8s RBAC, Workload Identity integration), Service Mesh and Istio (sidecar proxy, control plane vs data plane, mTLS, traffic management, observability, VirtualService, DestinationRule, Gateway, circuit breaker, canary deployments, AzureShop comparison), Kubernetes Autoscaling (HPA, VPA, Cluster Autoscaler, KEDA, metrics-server, how Services enable transparent scaling, AzureShop HPA and node autoscaler implementation), Persistent Volumes and PVCs (PV lifecycle, StorageClass, access modes, emptyDir vs PVC, static vs dynamic provisioning, AzureShop Prometheus/Grafana PVC usage, Azure Disk vs Azure File), Kubernetes Ingress (Ingress resource vs Ingress Controller, NGINX Ingress, path-based routing, TLS termination, canary deployments, how AzureShop routes traffic through Application Gateway → NGINX → api-gateway → services), Full Kubernetes Architecture (Control Plane components: API Server, etcd, Scheduler, Controller Manager, Cloud Controller Manager — Worker Node components: kubelet, kube-proxy, Container Runtime, Pods — end-to-end flow of kubectl apply, AzureShop AKS architecture mapping), Init Containers (purpose, sequencing, real-world use cases, AzureShop examples), Resource Requests and Limits (CPU/memory requests vs limits, how Scheduler uses them, OOMKilled, QoS classes, AzureShop values), Taints and Tolerations (what they are, taint effects, how AzureShop system node pool uses them, NodeSelector vs NodeAffinity vs Taints), StatefulSet vs Deployment (ordered pods, stable network identity, headless Service, when to use each, AzureShop databases), DaemonSet (one pod per node guarantee, use cases, how AzureShop uses DaemonSets for monitoring and CSI), Kubernetes Troubleshooting (CrashLoopBackOff diagnosis and fix, Pending pod causes, OOMKilled detection and resolution, ImagePullBackOff and ErrImagePull, Terminating pod stuck, Service not routing traffic to pods, Node NotReady — full kubectl debugging commands for each scenario with AzureShop examples), kubectl Commands Cheatsheet (get/describe/logs/exec/apply/delete for pods, deployments, services, nodes, namespaces, configmaps, secrets — with flags and real AzureShop examples), kubectl Debugging and Advanced Commands (port-forward, debug, top, rollout, patch, label, taint, cordon, drain, diff, explain — interview-focused with AzureShop context).
 
 ---
 
@@ -49,6 +49,8 @@ Covers: Pod vs Deployment vs Service, liveness vs readiness probes, namespaces, 
 40. [How Do You Troubleshoot a Pod Stuck in Terminating State?](#q40-how-do-you-troubleshoot-a-pod-stuck-in-terminating-state)
 41. [How Do You Troubleshoot When a Service is Not Routing Traffic to Pods?](#q41-how-do-you-troubleshoot-when-a-service-is-not-routing-traffic-to-pods)
 42. [How Do You Troubleshoot a Node in NotReady State?](#q42-how-do-you-troubleshoot-a-node-in-notready-state)
+43. [What are the Essential kubectl Commands Every DevOps Engineer Must Know?](#q43-what-are-the-essential-kubectl-commands-every-devops-engineer-must-know)
+44. [What are the Advanced kubectl Commands for Debugging and Day-to-Day Operations?](#q44-what-are-the-advanced-kubectl-commands-for-debugging-and-day-to-day-operations)
 
 ---
 
@@ -8997,4 +8999,731 @@ az vmss list-instances \
 3. **What does Kubernetes do automatically when a node goes NotReady?** — After approximately 40 seconds of no heartbeat, the Node Controller marks the node as NotReady and records this in etcd. After 5 minutes (the default pod eviction timeout), it automatically adds a `node.kubernetes.io/not-ready:NoExecute` taint to the node. Any pod without a matching toleration is immediately evicted and the ReplicaSet Controller reschedules those pods on healthy nodes. If the Cluster Autoscaler is enabled and remaining nodes are full, it will automatically provision a new node from Azure to accommodate the evicted pods.
 
 4. **What kubectl command do you use first when a node is NotReady?** — `kubectl describe node <node-name>`. Look at the Conditions section — it shows whether the node has MemoryPressure, DiskPressure, or PIDPressure, and what the Ready condition reason is. The Events section at the bottom shows recent activity on the node. Then check `kubectl get pods -A -o wide | grep <node-name>` to see what pods were running on the affected node and whether they have been rescheduled. In AKS, also check the Azure Portal or `az vm list` to confirm the underlying VM is still running.
+
+
+---
+
+## Q43. What are the Essential kubectl Commands Every DevOps Engineer Must Know?
+
+### What is kubectl?
+
+`kubectl` is the **command-line tool for talking to your Kubernetes cluster**. Every action you take on a Kubernetes cluster — creating pods, checking status, reading logs, deleting resources — goes through kubectl. It talks to the API Server over HTTPS and sends your instructions.
+
+Think of kubectl as the **remote control for your Kubernetes cluster**. Just like a TV remote has buttons for different functions (volume, channel, power), kubectl has commands for different operations (get, describe, apply, delete, logs).
+
+---
+
+### Section 1 — Cluster and Context Commands
+
+These commands tell kubectl WHICH cluster to talk to.
+
+```bash
+# See all clusters configured on your machine
+kubectl config get-contexts
+
+# Output:
+CURRENT   NAME                        CLUSTER                      AUTHINFO
+*         azureshop-aks-dev           azureshop-aks-dev            clusterUser_rg-azureshopdev_azureshop-aks-dev
+          azureshop-aks-staging       azureshop-aks-staging        ...
+
+# Switch to a different cluster
+kubectl config use-context azureshop-aks-staging
+
+# See which cluster kubectl is currently talking to
+kubectl config current-context
+
+# See the full kubeconfig file
+kubectl config view
+
+# In AzureShop — get credentials for AKS cluster
+az aks get-credentials \
+  --resource-group rg-azureshopdev \
+  --name azureshop-aks-dev
+# This writes the cluster credentials into ~/.kube/config
+```
+
+---
+
+### Section 2 — Namespace Commands
+
+A namespace is like a folder inside your cluster. All AzureShop resources live in the `dev` namespace.
+
+```bash
+# List all namespaces
+kubectl get namespaces
+# or short form:
+kubectl get ns
+
+# Set a default namespace so you don't have to type -n dev every time
+kubectl config set-context --current --namespace=dev
+
+# After setting default namespace:
+kubectl get pods          # automatically looks in dev namespace
+# Without setting:
+kubectl get pods -n dev   # must specify each time
+
+# Create a namespace
+kubectl create namespace staging
+
+# Delete a namespace (CAUTION: deletes everything inside it)
+kubectl delete namespace staging
+```
+
+---
+
+### Section 3 — Pod Commands
+
+Pods are the most common thing you work with day to day.
+
+```bash
+# List all pods in current namespace
+kubectl get pods
+kubectl get pods -n dev          # specific namespace
+kubectl get pods -A              # ALL namespaces at once
+kubectl get pods -o wide         # extra info: node name, IP address
+
+# Watch pods in real time (auto-refreshes)
+kubectl get pods -w              # -w = watch
+
+# Get a specific pod
+kubectl get pod user-service-7d4f9b-abc12 -n dev
+
+# See full details of a pod (events, volumes, env vars, conditions)
+kubectl describe pod user-service-7d4f9b-abc12 -n dev
+
+# Read logs from a pod
+kubectl logs user-service-7d4f9b-abc12 -n dev
+kubectl logs user-service-7d4f9b-abc12 -n dev --previous    # logs from last crash
+kubectl logs user-service-7d4f9b-abc12 -n dev -f            # follow (stream) live logs
+kubectl logs user-service-7d4f9b-abc12 -n dev --tail=100    # last 100 lines only
+kubectl logs user-service-7d4f9b-abc12 -n dev -c user-service  # specific container (if multiple)
+
+# Run a command inside a running pod
+kubectl exec -it user-service-7d4f9b-abc12 -n dev -- /bin/sh
+kubectl exec -it user-service-7d4f9b-abc12 -n dev -- env        # print env vars
+kubectl exec -it user-service-7d4f9b-abc12 -n dev -- ls /app    # list files
+
+# Delete a pod (Deployment will recreate it automatically)
+kubectl delete pod user-service-7d4f9b-abc12 -n dev
+
+# Force delete a stuck pod
+kubectl delete pod user-service-7d4f9b-abc12 -n dev --force --grace-period=0
+
+# Get pod output as YAML (see everything Kubernetes knows about the pod)
+kubectl get pod user-service-7d4f9b-abc12 -n dev -o yaml
+
+# Get just the pod's IP and node
+kubectl get pod user-service-7d4f9b-abc12 -n dev -o wide
+```
+
+---
+
+### Section 4 — Deployment Commands
+
+Deployments manage your pods — this is what you create and update most often.
+
+```bash
+# List all deployments
+kubectl get deployments -n dev
+kubectl get deploy -n dev          # "deploy" is a short alias
+
+# Describe a deployment
+kubectl describe deployment user-service -n dev
+
+# Create/update from a YAML file
+kubectl apply -f user-service-deployment.yaml
+kubectl apply -f k8s/              # apply ALL yaml files in a folder
+
+# Delete a deployment (and all its pods)
+kubectl delete deployment user-service -n dev
+
+# Scale a deployment up or down instantly
+kubectl scale deployment user-service --replicas=5 -n dev
+kubectl scale deployment user-service --replicas=1 -n dev
+
+# Check rollout status (is the rolling update complete?)
+kubectl rollout status deployment/user-service -n dev
+# Output: "successfully rolled out" or shows progress
+
+# See rollout history
+kubectl rollout history deployment/user-service -n dev
+
+# Rollback to the previous version
+kubectl rollout undo deployment/user-service -n dev
+
+# Rollback to a specific revision number
+kubectl rollout undo deployment/user-service -n dev --to-revision=3
+
+# Restart all pods in a deployment (rolling restart, zero downtime)
+kubectl rollout restart deployment/user-service -n dev
+# Use this when: config changed, secret rotated, env var updated
+
+# Pause a rolling update midway
+kubectl rollout pause deployment/user-service -n dev
+
+# Resume a paused rollout
+kubectl rollout resume deployment/user-service -n dev
+```
+
+---
+
+### Section 5 — Service Commands
+
+Services give your pods a stable network address.
+
+```bash
+# List all services
+kubectl get services -n dev
+kubectl get svc -n dev             # "svc" is the short alias
+
+# Describe a service (see selector, ports, endpoints)
+kubectl describe service user-service -n dev
+
+# Check which pod IPs a service is routing to (most useful for debugging)
+kubectl get endpoints user-service -n dev
+kubectl get ep user-service -n dev   # "ep" is the short alias
+
+# Output:
+NAME           ENDPOINTS                           AGE
+user-service   10.240.0.7:3001,10.240.0.8:3001   5m
+# If it shows <none> → selector mismatch or pods not Ready
+
+# Expose a deployment as a service quickly (for testing)
+kubectl expose deployment user-service --port=3001 --type=ClusterIP -n dev
+```
+
+---
+
+### Section 6 — ConfigMap and Secret Commands
+
+ConfigMaps store non-sensitive config. Secrets store sensitive data.
+
+```bash
+# List ConfigMaps
+kubectl get configmaps -n dev
+kubectl get cm -n dev              # "cm" is the short alias
+
+# See ConfigMap contents
+kubectl describe configmap user-service-config -n dev
+kubectl get configmap user-service-config -n dev -o yaml
+
+# Create a ConfigMap from a literal value (quick test)
+kubectl create configmap test-config \
+  --from-literal=APP_ENV=dev \
+  --from-literal=LOG_LEVEL=info \
+  -n dev
+
+# List Secrets
+kubectl get secrets -n dev
+
+# Describe a Secret (shows keys but NOT the values — they are base64)
+kubectl describe secret user-service-secrets -n dev
+
+# Decode a secret value (base64 decode)
+kubectl get secret user-service-secrets -n dev -o jsonpath='{.data.DB_PASSWORD}' | base64 --decode
+# This prints the actual password value
+
+# Delete a ConfigMap or Secret
+kubectl delete configmap test-config -n dev
+kubectl delete secret old-secret -n dev
+```
+
+---
+
+### Section 7 — Node Commands
+
+Nodes are the virtual machines your pods run on.
+
+```bash
+# List all nodes
+kubectl get nodes
+kubectl get nodes -o wide          # shows IP, OS, container runtime
+
+# See node details (CPU/memory capacity, taints, conditions, pods on it)
+kubectl describe node aks-workerpool-node1
+
+# Check resource usage across all nodes
+kubectl top nodes
+# Output:
+# NAME                    CPU(cores)   CPU%   MEMORY(bytes)   MEMORY%
+# aks-workerpool-node1    850m         21%    3800Mi          47%
+# aks-workerpool-node2    200m         5%     2100Mi          26%
+
+# Mark a node as unschedulable (no new pods will land here)
+kubectl cordon aks-workerpool-node1
+
+# Remove the unschedulable mark
+kubectl uncordon aks-workerpool-node1
+
+# Drain a node — evict all pods AND cordon it (use before maintenance)
+kubectl drain aks-workerpool-node1 \
+  --ignore-daemonsets \       # DaemonSet pods cannot be evicted, skip them
+  --delete-emptydir-data      # allow eviction of pods using emptyDir volumes
+
+# Add a label to a node
+kubectl label node aks-workerpool-node1 environment=prod
+
+# Add a taint to a node
+kubectl taint nodes aks-workerpool-node1 dedicated=gpu:NoSchedule
+
+# Remove a taint from a node
+kubectl taint nodes aks-workerpool-node1 dedicated=gpu:NoSchedule-
+```
+
+---
+
+### Section 8 — Resource Usage Commands
+
+```bash
+# CPU and memory usage of all pods in a namespace
+kubectl top pods -n dev
+kubectl top pods -n dev --sort-by=memory    # sort by memory usage
+kubectl top pods -n dev --sort-by=cpu       # sort by CPU usage
+
+# CPU and memory usage of all nodes
+kubectl top nodes
+
+# These commands require metrics-server to be installed
+# In AKS, metrics-server comes pre-installed
+```
+
+---
+
+### Section 9 — Applying and Managing YAML Files
+
+```bash
+# Apply a single file (create or update)
+kubectl apply -f deployment.yaml
+
+# Apply all files in a directory
+kubectl apply -f k8s/
+
+# Apply all files in a directory recursively (including subdirectories)
+kubectl apply -f k8s/ -R
+
+# Dry run — see what WOULD happen without actually doing it
+kubectl apply -f deployment.yaml --dry-run=client
+kubectl apply -f deployment.yaml --dry-run=server    # validates against the API Server
+
+# See the difference between what is in the cluster vs your file
+kubectl diff -f deployment.yaml
+
+# Delete resources defined in a file
+kubectl delete -f deployment.yaml
+
+# Get all resources in a namespace at once
+kubectl get all -n dev
+# Shows: pods, deployments, replicasets, services, statefulsets, daemonsets
+```
+
+---
+
+### Section 10 — Useful Flags to Know
+
+These flags work with most kubectl commands:
+
+```bash
+-n <namespace>          # specify the namespace
+-A or --all-namespaces  # all namespaces at once
+-o wide                 # extra columns (node, IP)
+-o yaml                 # full YAML output
+-o json                 # full JSON output
+-o jsonpath='...'       # extract a specific field
+-w or --watch           # watch/stream live updates
+-f <file>               # read from a file
+-l <label>              # filter by label
+--dry-run=client        # simulate without making changes
+--force                 # force the action
+--grace-period=0        # no graceful shutdown period
+-it                     # interactive terminal (for exec)
+--previous              # previous container (for logs)
+--tail=<n>              # last N lines (for logs)
+-f (logs)               # follow/stream logs
+```
+
+```bash
+# Examples of jsonpath — extract specific values
+kubectl get pod user-service-xxx -n dev -o jsonpath='{.status.podIP}'
+# → 10.240.0.7
+
+kubectl get nodes -o jsonpath='{.items[*].metadata.name}'
+# → aks-workerpool-node1 aks-workerpool-node2
+
+# Filter pods by label
+kubectl get pods -n dev -l app=user-service
+kubectl get pods -n dev -l app=user-service,version=v1
+```
+
+---
+
+### AzureShop Daily Workflow Commands
+
+These are the commands you would run every day working on AzureShop:
+
+```bash
+# Morning check — is everything healthy?
+kubectl get pods -n dev
+kubectl get nodes
+kubectl top nodes
+
+# Deploy a new version via Helm
+helm upgrade azureshop-dev ./helm/charts/user-service \
+  -f helm/values/dev.yaml \
+  -n dev
+
+# Check the rollout is complete
+kubectl rollout status deployment/user-service -n dev
+
+# Something went wrong — check logs
+kubectl logs -l app=user-service -n dev --tail=50
+
+# Something is really wrong — rollback
+kubectl rollout undo deployment/user-service -n dev
+
+# Check what is using the most memory
+kubectl top pods -n dev --sort-by=memory
+
+# Verify a secret was mounted correctly
+kubectl exec -it <pod-name> -n dev -- ls /mnt/secrets-store/
+```
+
+---
+
+### Interview Prep
+
+1. **What is kubectl and what does it do?** — kubectl is the command-line interface for Kubernetes. It communicates with the Kubernetes API Server over HTTPS, sending commands to create, read, update, and delete resources. When you run `kubectl apply`, kubectl reads your YAML file, converts it to a REST API call (HTTP POST or PUT), and sends it to the API Server. The API Server then validates, saves to etcd, and notifies the relevant controllers. Everything you do to a Kubernetes cluster — from checking pod status to rolling back a deployment — goes through kubectl.
+
+2. **What is the difference between `kubectl get` and `kubectl describe`?** — `kubectl get` gives you a short summary table — name, status, age, restarts. It is useful for a quick overview of many resources at once. `kubectl describe` gives you the complete picture of one specific resource — all fields, all events, all conditions, mounted volumes, environment variables, and what Kubernetes has done with the resource. For troubleshooting, always use `kubectl describe` — the Events section at the bottom is where Kubernetes writes what went wrong.
+
+3. **What does `kubectl apply` do and how is it different from `kubectl create`?** — `kubectl apply` creates the resource if it does not exist, or updates it if it already exists. It is idempotent — you can run it multiple times safely. `kubectl create` only creates — it fails if the resource already exists. In practice, always use `kubectl apply` for managing resources because it works whether you are deploying for the first time or updating an existing deployment.
+
+4. **What is `kubectl rollout undo` and when do you use it?** — `kubectl rollout undo` rolls back a Deployment to its previous version. Kubernetes keeps a history of Deployment revisions (controlled by `revisionHistoryLimit`). When a bad deployment causes CrashLoopBackOff or errors in production, `kubectl rollout undo deployment/<name>` immediately starts a rolling update back to the previous working image version. You can also roll back to a specific version using `--to-revision=<number>`. It is one of the most important emergency commands for a DevOps engineer.
+
+5. **What is the difference between `kubectl delete pod` and `kubectl delete deployment`?** — `kubectl delete pod` deletes one specific pod. But if that pod belongs to a Deployment, the ReplicaSet Controller immediately creates a new pod to replace it — the pod comes back. `kubectl delete deployment` deletes the Deployment and all the pods it manages — they do not come back because the controller itself is gone. To permanently remove an application from the cluster, delete the Deployment (or use `helm uninstall`). Deleting individual pods is useful for forcing a pod restart without touching the Deployment.
+
+---
+
+## Q44. What are the Advanced kubectl Commands for Debugging and Day-to-Day Operations?
+
+### Why Advanced Commands Matter
+
+The basic commands (get, describe, logs, apply) get you through 80% of daily work. But interviews and real incidents test whether you know the more powerful tools — port-forward for local testing, rollout for managing deployments, patch for quick fixes, and diff for safe deployments. These commands separate a junior from a senior DevOps engineer.
+
+---
+
+### Section 1 — Port-Forward (Test a Service Locally)
+
+`kubectl port-forward` creates a tunnel from your local machine to a pod or service inside the cluster. You can then reach the pod as if it were running on `localhost`.
+
+```bash
+# Forward local port 8080 to pod port 3001
+kubectl port-forward pod/user-service-7d4f9b-abc12 8080:3001 -n dev
+# Now open browser: http://localhost:8080 → talks to user-service inside the cluster
+
+# Forward to a Service (load-balances across all pods behind the service)
+kubectl port-forward svc/user-service 8080:3001 -n dev
+
+# Forward to a deployment (picks one of the deployment's pods)
+kubectl port-forward deployment/user-service 8080:3001 -n dev
+
+# Run in background
+kubectl port-forward svc/grafana 3000:3000 -n monitoring &
+# Now access Grafana at http://localhost:3000 without exposing it to the internet
+```
+
+**In AzureShop** — you use port-forward to access Grafana and Prometheus dashboards locally without needing to create a LoadBalancer service:
+```bash
+kubectl port-forward svc/prometheus-server 9090:9090 -n monitoring
+kubectl port-forward svc/grafana 3000:3000 -n monitoring
+```
+
+---
+
+### Section 2 — Debug Pod (Run a Temporary Container for Testing)
+
+Sometimes you need to run a quick command inside the cluster — test DNS, check network connectivity, curl a service. Instead of exec-ing into an existing pod, you create a temporary debug pod.
+
+```bash
+# Run a temporary pod with a shell — deleted automatically when you exit
+kubectl run debug-pod --image=busybox --restart=Never -it --rm -n dev -- sh
+# --rm deletes the pod when you exit the shell
+# -it gives you an interactive terminal
+
+# Inside the debug pod you can:
+nslookup user-service          # check DNS resolution
+nc -zv user-service 3001       # check TCP connectivity
+wget -qO- http://user-service:3001/health   # check HTTP endpoint
+
+# Run a curl debug pod
+kubectl run curl-test --image=curlimages/curl --restart=Never -it --rm -n dev -- \
+  curl -v http://user-service:3001/health
+
+# Debug a specific node (privileged — can see node filesystem)
+kubectl debug node/aks-workerpool-node1 -it --image=mcr.microsoft.com/cbl-mariner/busybox:2.0
+```
+
+---
+
+### Section 3 — Rollout Commands (Manage Deployments Safely)
+
+```bash
+# Check if a deployment finished rolling out
+kubectl rollout status deployment/user-service -n dev
+# Blocks until complete — useful in CI/CD pipelines:
+# if kubectl rollout status times out → deployment failed → pipeline fails
+
+# See revision history
+kubectl rollout history deployment/user-service -n dev
+# REVISION  CHANGE-CAUSE
+# 1         <none>
+# 2         kubectl set image deployment/user-service user-service=acr.../user-service:v1.1.0
+# 3         kubectl set image deployment/user-service user-service=acr.../user-service:v1.2.0
+
+# See details of a specific revision
+kubectl rollout history deployment/user-service -n dev --revision=2
+
+# Rollback to previous
+kubectl rollout undo deployment/user-service -n dev
+
+# Rollback to a specific revision
+kubectl rollout undo deployment/user-service -n dev --to-revision=1
+
+# Update the image of a deployment directly (without editing YAML)
+kubectl set image deployment/user-service \
+  user-service=acrazureshopdev.azurecr.io/user-service:v1.2.0 \
+  -n dev
+
+# Restart all pods in a deployment (zero-downtime rolling restart)
+kubectl rollout restart deployment/user-service -n dev
+# Use this when: environment variable changed, secret rotated, configmap updated
+
+# Pause rollout midway (e.g., canary check)
+kubectl rollout pause deployment/user-service -n dev
+# Resume after checking
+kubectl rollout resume deployment/user-service -n dev
+```
+
+---
+
+### Section 4 — Patch (Quick In-Place Updates Without Editing YAML)
+
+`kubectl patch` lets you update specific fields of a resource without editing and re-applying the full YAML. It is useful for quick fixes in emergencies.
+
+```bash
+# Patch a deployment to change replica count
+kubectl patch deployment user-service -n dev \
+  -p '{"spec":{"replicas":5}}'
+
+# Patch a pod to remove a finalizer (unstick a Terminating pod)
+kubectl patch pod stuck-pod-xxx -n dev \
+  -p '{"metadata":{"finalizers":[]}}' \
+  --type=merge
+
+# Patch a service to change its type
+kubectl patch svc user-service -n dev \
+  -p '{"spec":{"type":"LoadBalancer"}}'
+
+# Strategic merge patch (default) vs JSON merge patch vs JSON patch
+# --type=merge       → JSON merge patch (replace the field entirely)
+# --type=json        → JSON patch (add/remove/replace specific operations)
+# --type=strategic   → Kubernetes strategic merge (default, smart merge for lists)
+```
+
+---
+
+### Section 5 — Labels (Organise and Filter Resources)
+
+```bash
+# Add a label to a pod
+kubectl label pod user-service-7d4f9b-abc12 version=v1.2.0 -n dev
+
+# Update an existing label (--overwrite)
+kubectl label pod user-service-7d4f9b-abc12 version=v1.3.0 --overwrite -n dev
+
+# Remove a label (key-)
+kubectl label pod user-service-7d4f9b-abc12 version- -n dev
+
+# Add a label to a node
+kubectl label node aks-workerpool-node1 disktype=ssd
+
+# Filter resources by label
+kubectl get pods -n dev -l app=user-service
+kubectl get pods -n dev -l app=user-service,env=dev
+kubectl get pods -n dev -l 'app in (user-service,product-service)'
+kubectl get pods -n dev -l 'app notin (api-gateway)'
+```
+
+---
+
+### Section 6 — Explain (Built-in Documentation)
+
+`kubectl explain` shows you the documentation for any Kubernetes resource field — right in your terminal. No need to go to the internet.
+
+```bash
+# Explain a resource
+kubectl explain pod
+kubectl explain deployment
+kubectl explain service
+
+# Explain a specific field
+kubectl explain pod.spec
+kubectl explain pod.spec.containers
+kubectl explain pod.spec.containers.resources
+kubectl explain pod.spec.containers.livenessProbe
+
+# Recursive — see all fields and sub-fields
+kubectl explain pod.spec --recursive
+```
+
+**This is extremely useful in interviews** — if you forget a field name, `kubectl explain` finds it instantly.
+
+---
+
+### Section 7 — Diff (Safe Deployments — See Changes Before Applying)
+
+```bash
+# See what WILL change before you apply
+kubectl diff -f user-service-deployment.yaml -n dev
+
+# Output shows + (added) and - (removed) like a git diff:
+# -          replicas: 2
+# +          replicas: 3
+#            image: acrazureshopdev.azurecr.io/user-service:v1.0.0
+# -          image: acrazureshopdev.azurecr.io/user-service:v1.0.0
+# +          image: acrazureshopdev.azurecr.io/user-service:v1.1.0
+
+# Best practice in pipelines:
+kubectl diff -f k8s/ && kubectl apply -f k8s/
+# Only apply if diff shows expected changes
+```
+
+---
+
+### Section 8 — Copy Files To/From Pods
+
+```bash
+# Copy a file FROM a pod to your local machine
+kubectl cp user-service-7d4f9b-abc12:/app/logs/app.log ./app.log -n dev
+
+# Copy a file TO a pod from your local machine
+kubectl cp ./config-override.json user-service-7d4f9b-abc12:/app/config/ -n dev
+
+# Useful for: extracting log files, uploading temporary config for debugging
+```
+
+---
+
+### Section 9 — Events (What Kubernetes Has Been Doing)
+
+```bash
+# See all events in a namespace (sorted by time)
+kubectl get events -n dev
+kubectl get events -n dev --sort-by='.lastTimestamp'
+
+# See only Warning events (filter out normal Info events)
+kubectl get events -n dev --field-selector type=Warning
+
+# Watch events in real time
+kubectl get events -n dev -w
+
+# Events are very useful when describe pod shows no obvious cause:
+# Events will show scheduler failures, image pull errors, volume mount issues
+```
+
+---
+
+### Section 10 — Helm Commands (Used Together with kubectl)
+
+```bash
+# List all Helm releases
+helm list -n dev
+helm list -A              # all namespaces
+
+# Install a chart
+helm install azureshop-dev ./helm/charts/user-service \
+  -f helm/values/dev.yaml \
+  -n dev
+
+# Upgrade an existing release
+helm upgrade azureshop-dev ./helm/charts/user-service \
+  -f helm/values/dev.yaml \
+  -n dev
+
+# Install or upgrade (whichever is needed)
+helm upgrade --install azureshop-dev ./helm/charts/user-service \
+  -f helm/values/dev.yaml \
+  -n dev
+
+# See what Helm would change (dry run)
+helm upgrade azureshop-dev ./helm/charts/user-service \
+  -f helm/values/dev.yaml \
+  -n dev \
+  --dry-run
+
+# Check the status of a release
+helm status azureshop-dev -n dev
+
+# See the history of a release
+helm history azureshop-dev -n dev
+
+# Rollback a Helm release to the previous version
+helm rollback azureshop-dev -n dev
+helm rollback azureshop-dev 2 -n dev   # rollback to revision 2
+
+# Uninstall a release (removes all resources it created)
+helm uninstall azureshop-dev -n dev
+
+# Render the templates without installing (see the final YAML)
+helm template azureshop-dev ./helm/charts/user-service \
+  -f helm/values/dev.yaml
+```
+
+---
+
+### AzureShop Full Incident Response Workflow
+
+This is the exact sequence of commands you would run during a production incident in AzureShop:
+
+```bash
+# STEP 1 — Assess the situation
+kubectl get pods -n dev              # what is broken?
+kubectl get nodes                    # are nodes healthy?
+kubectl get events -n dev --sort-by='.lastTimestamp' | tail -20  # recent events
+
+# STEP 2 — Diagnose the broken pod
+kubectl describe pod <broken-pod> -n dev     # what does Kubernetes say?
+kubectl logs <broken-pod> -n dev --previous  # what did the app say before crashing?
+
+# STEP 3 — Quick containment
+kubectl rollout undo deployment/user-service -n dev  # rollback if new deploy caused it
+kubectl rollout status deployment/user-service -n dev  # verify rollback completed
+
+# STEP 4 — Test connectivity
+kubectl port-forward svc/user-service 8080:3001 -n dev  # test locally
+curl http://localhost:8080/health
+
+# STEP 5 — Investigate resources
+kubectl top pods -n dev --sort-by=memory   # anything using too much?
+kubectl top nodes                           # any node under pressure?
+
+# STEP 6 — Check service routing
+kubectl get endpoints user-service -n dev  # is service finding pods?
+
+# STEP 7 — Verify fix and watch
+kubectl get pods -n dev -w     # watch pods stabilise
+```
+
+---
+
+### Interview Prep
+
+1. **What does `kubectl port-forward` do and when do you use it?** — `kubectl port-forward` creates a tunnel from your local machine directly to a pod or Service inside the cluster. It maps a local port to a port inside the cluster. You use it to test services that are not exposed to the internet — like Grafana, Prometheus, or an internal API — without creating a LoadBalancer or Ingress. It is a development and debugging tool, not meant for production traffic. In AzureShop, it is the standard way to access Prometheus and Grafana dashboards locally.
+
+2. **What is `kubectl rollout restart` and when do you use it?** — `kubectl rollout restart deployment/<name>` triggers a rolling restart of all pods in a Deployment — it creates new pods and removes old ones in a rolling fashion so there is no downtime. You use it when something changed outside the container image: an environment variable was updated in a ConfigMap, a Secret was rotated, or you need to force pods to pick up a new version of a mounted config file. The image does not change — only the pods are recreated so they mount fresh config.
+
+3. **What is the difference between `kubectl patch` and `kubectl edit`?** — `kubectl edit` opens the full resource YAML in your terminal editor (vim by default) and applies the whole file when you save. It is interactive and lets you see everything. `kubectl patch` applies a targeted, scriptable change to specific fields without opening an editor. `patch` is better for automation and CI/CD pipelines because you can script it precisely. `edit` is better for one-off manual changes when you need to see the full context of a resource.
+
+4. **What does `kubectl diff` do and why is it important?** — `kubectl diff` shows you exactly what will change in the cluster when you run `kubectl apply` — before you actually apply it. It works like `git diff`: lines with `-` will be removed, lines with `+` will be added. This is a critical safety check before deploying to production — you can confirm that only the expected changes (new image tag, updated replica count) will happen and nothing unexpected was accidentally modified. In AzureShop pipelines, `kubectl diff` runs before `kubectl apply` as a validation gate.
+
+5. **How do you use kubectl in a CI/CD pipeline?** — In AzureShop's Azure Pipelines, kubectl is used in three ways: (1) `kubectl apply -f` to deploy manifests after a successful Docker build; (2) `kubectl rollout status deployment/<name>` to block the pipeline until the deployment is fully rolled out — if it times out, the pipeline fails and the deployment is flagged as broken; (3) `kubectl rollout undo` in a rollback stage that triggers automatically if the rollout status step fails. The pipeline also uses `helm upgrade --install` for Helm-managed services, which has the same blocking behaviour via `kubectl rollout status`.
 
